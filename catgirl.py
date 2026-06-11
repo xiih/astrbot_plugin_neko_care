@@ -1,14 +1,18 @@
 import asyncio
+import ipaddress
 import math
 import random
+import re
 import shutil
+import socket
 import time
-import urllib.request
+import aiohttp
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 from typing import Dict, Optional, Tuple
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from .storage import JsonStore
 from .economy import EconomyService
@@ -20,6 +24,13 @@ def today_str() -> str:
 
 def now_ts() -> int:
     return int(time.time())
+
+
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
+MAX_IMAGE_PIXELS = 12_000_000
+MAX_IMAGE_WIDTH = 4096
+MAX_IMAGE_HEIGHT = 4096
+Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
 
 def current_feed_slot() -> Optional[str]:
@@ -381,58 +392,159 @@ class CatgirlService:
         return True, f"改名成功啦～以后就叫她「{name}」喵。"
 
     async def change_image(self, uid: str, image_src: str):
-        """先下载图片，成功后再扣费"""
+        """安全保存图片，成功后原子扣费。"""
         cat = self._get(uid)
         if not cat or not cat.get("name"):
             return False, "你还没有猫娘喔～发送「请赐我一只可爱猫娘吧」试试看。", None
 
-        balance = self.economy.get_balance(uid)
-        if balance < self.appearance_change_price:
-            return False, f"更换形象需要 {self.appearance_change_price} {self.coin_name}，你目前有 {balance} {self.coin_name}，还不够喔～", self.image_path(cat)
-
-        suffix = ".jpg"
-        if "." in image_src:
-            s = Path(image_src.split("?")[0]).suffix.lower()
-            if s in [".jpg", ".jpeg", ".png", ".webp"]:
-                suffix = s
-
-        out = self.upload_dir / f"{uid}_{int(time.time())}{suffix}"
+        safe_uid = self._safe_uid(uid)
+        stamp = int(time.time() * 1000)
+        tmp = self.upload_dir / f"{safe_uid}_{stamp}.tmp"
+        out = self.upload_dir / f"{safe_uid}_{stamp}.jpg"
 
         try:
-            await asyncio.to_thread(self._save_image_src, image_src, out)
+            await self._save_image_src(image_src, tmp)
+            await asyncio.to_thread(self._validate_and_normalize_image, tmp, out)
         except Exception as e:
+            tmp.unlink(missing_ok=True)
+            out.unlink(missing_ok=True)
             return False, f"保存图片失败：{e}", self.image_path(cat)
+        finally:
+            tmp.unlink(missing_ok=True)
 
-        self.economy.add_balance(uid, -self.appearance_change_price)
-        cat["image"] = str(out)
-        self._save(uid, cat)
+        def op(root):
+            wallet = root.setdefault("wallet", {})
+            cats = root.setdefault("catgirls", {})
+            current_cat = cats.get(uid)
+            if not current_cat or not current_cat.get("name"):
+                return False, "你还没有猫娘喔～发送「请赐我一只可爱猫娘吧」试试看。", None, None
 
-        return True, f"✨ 「{cat['name']}」换好新形象啦～\n花费：{self.appearance_change_price} {self.coin_name}\n当前余额：{self.economy.get_balance(uid)} {self.coin_name}\n\n当前状态：\n体重：{float(cat.get('weight', 5.0)):.1f} 斤\n饱食度：{float(cat.get('satiety', 0)):.0f}\n心情：{int(cat.get('mood', 0))}", self.image_path(cat)
+            balance = int(wallet.get(uid, 0))
+            if balance < self.appearance_change_price:
+                return False, f"更换形象需要 {self.appearance_change_price} {self.coin_name}，你目前有 {balance} {self.coin_name}，还不够喔～", current_cat, None
 
-    def _save_image_src(self, src: str, out: Path):
+            old_image = current_cat.get("image", "")
+            wallet[uid] = balance - self.appearance_change_price
+            current_cat["image"] = str(out)
+            return True, "", current_cat, old_image
+
+        ok, msg, updated_cat, old_image = self.store.update(op)
+        if not ok:
+            out.unlink(missing_ok=True)
+            return False, msg, self.image_path(updated_cat or cat)
+
+        self._delete_old_uploaded_image(old_image)
+        balance = self.economy.get_balance(uid)
+        return True, f"✨ 「{updated_cat['name']}」换好新形象啦～\n花费：{self.appearance_change_price} {self.coin_name}\n当前余额：{balance} {self.coin_name}\n\n当前状态：\n体重：{float(updated_cat.get('weight', 5.0)):.1f} 斤\n饱食度：{float(updated_cat.get('satiety', 0)):.0f}\n心情：{int(updated_cat.get('mood', 0))}", self.image_path(updated_cat)
+
+    def _safe_uid(self, uid: str) -> str:
+        safe = re.sub(r"[^a-zA-Z0-9_-]", "_", str(uid))[:64]
+        return safe or "user"
+
+    def _delete_old_uploaded_image(self, old_image: str):
+        if not old_image:
+            return
+        try:
+            old_path = Path(old_image).resolve()
+            old_path.relative_to(self.upload_dir.resolve())
+            if old_path.is_file():
+                old_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    def _host_is_blocked(self, host: str) -> bool:
+        try:
+            infos = socket.getaddrinfo(host, None)
+            for info in infos:
+                ip = ipaddress.ip_address(info[4][0])
+                if (
+                    ip.is_private
+                    or ip.is_loopback
+                    or ip.is_link_local
+                    or ip.is_reserved
+                    or ip.is_multicast
+                    or ip.is_unspecified
+                ):
+                    return True
+            return False
+        except Exception:
+            return True
+
+    def _validate_remote_url(self, src: str):
+        parsed = urlparse(src)
+        if parsed.scheme != "https":
+            raise ValueError("只允许 https 图片链接")
+        if not parsed.hostname:
+            raise ValueError("图片链接缺少主机名")
+        if self._host_is_blocked(parsed.hostname):
+            raise PermissionError("不允许访问内网、本机或保留地址")
+
+    async def _save_image_src(self, src: str, out: Path):
         out.parent.mkdir(parents=True, exist_ok=True)
 
         if src.startswith(("http://", "https://")):
-            req = urllib.request.Request(
-                src,
-                 headers={
+            self._validate_remote_url(src)
+            timeout = aiohttp.ClientTimeout(total=20, connect=5)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(src, headers={
                     "User-Agent": "Mozilla/5.0",
                     "Referer": "https://qq.com/",
-                },
-            )
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                out.write_bytes(resp.read())
+                }, allow_redirects=False) as resp:
+                    resp.raise_for_status()
+
+                    content_type = resp.headers.get("Content-Type", "").lower()
+                    if not content_type.startswith("image/"):
+                        raise ValueError("链接内容不是图片")
+
+                    content_length = resp.headers.get("Content-Length")
+                    if content_length and int(content_length) > MAX_IMAGE_BYTES:
+                        raise ValueError("图片文件过大")
+
+                    total = 0
+                    with out.open("wb") as f:
+                        async for chunk in resp.content.iter_chunked(64 * 1024):
+                            total += len(chunk)
+                            if total > MAX_IMAGE_BYTES:
+                                raise ValueError("图片文件过大")
+                            f.write(chunk)
             return
 
         if src.startswith("file://"):
             src = src[7:]
 
-        p = Path(src)
-        if p.exists():
-            shutil.copyfile(p, out)
+        p = Path(src).resolve()
+        try:
+            p.relative_to(self.upload_dir.resolve())
+        except ValueError:
+            raise PermissionError(f"安全限制：不允许访问 {src}")
+
+        if p.exists() and p.is_file():
+            if p.stat().st_size > MAX_IMAGE_BYTES:
+                raise ValueError("图片文件过大")
+            await asyncio.to_thread(shutil.copyfile, p, out)
             return
 
         raise FileNotFoundError(f"无法识别图片来源：{src}")
+
+    def _validate_and_normalize_image(self, src: Path, out: Path):
+        if src.stat().st_size > MAX_IMAGE_BYTES:
+            raise ValueError("图片文件过大")
+
+        with Image.open(src) as img:
+            img.verify()
+
+        with Image.open(src) as img:
+            img = ImageOps.exif_transpose(img)
+            width, height = img.size
+            if width <= 0 or height <= 0:
+                raise ValueError("图片尺寸无效")
+            if width * height > MAX_IMAGE_PIXELS or width > MAX_IMAGE_WIDTH or height > MAX_IMAGE_HEIGHT:
+                raise ValueError("图片尺寸过大")
+
+            img = img.convert("RGB")
+            img.thumbnail((MAX_IMAGE_WIDTH, MAX_IMAGE_HEIGHT), Image.LANCZOS)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            img.save(out, "JPEG", quality=90, optimize=True)
 
 
     def migrate_to_group(self, gid: str, uid: str):

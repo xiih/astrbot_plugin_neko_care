@@ -84,33 +84,33 @@ class SignService:
 
     def sign(self, uid: str, nickname: str):
         today = today_str()
-        data = self.store.get("sign", uid, default={}) or {}
-        if data.get("last_sign_date") == today:
-            return False, "今天已经签到过啦，明天再来喵～"
-
         inc = random.randint(self.sign_min, self.sign_max)
-        count = int(data.get("count", 0)) + 1
         quote, quote_from = self._random_quote()
 
         def op(root):
             sign = root.setdefault("sign", {})
             wallet = root.setdefault("wallet", {})
             user = sign.setdefault(uid, {})
+            if user.get("last_sign_date") == today:
+                return False, "今天已经签到过啦，明天再来喵～"
+
+            count = int(user.get("count", 0)) + 1
             user["last_sign_date"] = today
             user["count"] = count
             user["last_nickname"] = nickname
             wallet[uid] = int(wallet.get(uid, 0)) + inc
 
-        self.store.update(op)
-        return True, {
-            "uid": uid,
-            "nickname": nickname,
-            "inc": inc,
-            "balance": self.economy.get_balance(uid),
-            "count": count,
-            "quote": quote,
-            "quote_from": quote_from,
-        }
+            return True, {
+                "uid": uid,
+                "nickname": nickname,
+                "inc": inc,
+                "balance": int(wallet[uid]),
+                "count": count,
+                "quote": quote,
+                "quote_from": quote_from,
+            }
+
+        return self.store.update(op)
 
     def _font(self, size: int, bold: bool = False):
         candidates = []

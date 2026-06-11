@@ -52,7 +52,7 @@
 | `work_max_reward` | 打工最大奖励 | 120 |
 | `catgirl_wish_probability` | 许愿成功概率 | 0.8 (80%) |
 | `catgirl_wish_pity` | 许愿保底次数 | 3 |
-| `appearance_ticket_price` | 形象券价格 | 1200 |
+| `appearance_change_price` | 形象券价格 | 1200 |
 | `extra_admin_ids` | 额外管理员 ID 列表 | [] |
 
 ## 🎨 自定义资源

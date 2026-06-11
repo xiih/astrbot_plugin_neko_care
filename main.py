@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star, register, StarTools
 
 try:
     from astrbot.api.message_components import Plain, Image
@@ -29,19 +29,19 @@ class SapphireEconomyPlugin(Star):
         super().__init__(context)
         self.config = config or {}
 
-        self.coin_name = self.config.get("coin_name", "宝石")
+        self.coin_name = str(self.config.get("coin_name", "宝石"))[:16] or "宝石"
         self.sign_mode = "图片签到" if self.config.get("sign_mode", "图片签到") in ("图片签到", "image") else "文字签到"
         self.keyword_trigger_enabled = bool(self.config.get("keyword_trigger_enabled", True))
-        
-        self.sign_min = int(self.config.get("sign_min_reward", 80))
-        self.sign_max = int(self.config.get("sign_max_reward", 150))
-        self.work_min = int(self.config.get("work_min_reward", 50))
-        self.work_max = int(self.config.get("work_max_reward", 120))
-        
+
+        self.sign_min = max(0, int(self.config.get("sign_min_reward", 80)))
+        self.sign_max = max(self.sign_min, int(self.config.get("sign_max_reward", 150)))
+        self.work_min = max(0, int(self.config.get("work_min_reward", 50)))
+        self.work_max = max(self.work_min, int(self.config.get("work_max_reward", 120)))
+
         self.extra_admin_ids = set(str(x) for x in self.config.get("extra_admin_ids", []))
-        self.wish_probability = float(self.config.get("catgirl_wish_probability", 0.8))
-        self.wish_pity = int(self.config.get("catgirl_wish_pity", 3))
-        self.appearance_change_price = int(self.config.get("appearance_change_price", 1200))
+        self.wish_probability = min(1.0, max(0.0, float(self.config.get("catgirl_wish_probability", 0.8))))
+        self.wish_pity = max(1, int(self.config.get("catgirl_wish_pity", 3)))
+        self.appearance_change_price = max(0, int(self.config.get("appearance_change_price", 1200)))
 
         base_dir = Path(__file__).resolve().parent
         self.base_dir = base_dir
@@ -78,6 +78,7 @@ class SapphireEconomyPlugin(Star):
 
         self._pending_adoptions = {}
         self._pending_image_changes = {}
+        self._background_tasks = set()
 
     def _ensure_default_quote_file(self):
         if self.quote_file.exists():
@@ -108,7 +109,22 @@ class SapphireEconomyPlugin(Star):
             return str(event.get_sender_id())
 
     def _is_admin(self, event: AstrMessageEvent) -> bool:
-        return str(event.get_sender_id()) in self.extra_admin_ids
+        uid = str(event.get_sender_id())
+        if uid in self.extra_admin_ids:
+            return True
+        for attr in ("is_admin", "is_superuser"):
+            checker = getattr(event, attr, None)
+            if callable(checker):
+                try:
+                    if checker():
+                        return True
+                except Exception:
+                    pass
+        try:
+            role = str(getattr(event, "role", "") or getattr(event, "sender_role", "")).lower()
+            return role in ("admin", "administrator", "owner", "superuser")
+        except Exception:
+            return False
 
     def _extract_at_uid(self, event: AstrMessageEvent) -> Optional[str]:
         try:
@@ -278,7 +294,9 @@ class SapphireEconomyPlugin(Star):
             "second": second,
             "expire": time.time() + 120,
         }
-        asyncio.create_task(self._auto_finalize_adoption(uid, token, gid))
+        task = asyncio.create_task(self._auto_finalize_adoption(uid, token, gid))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
         img = self.catgirl.image_path(first)
         yield self._mixed_result(event, msg, img)
 
@@ -355,6 +373,8 @@ class SapphireEconomyPlugin(Star):
     @filter.regex(r"^.*$")
     async def pending_image_listener(self, event: AstrMessageEvent):
         uid = self._uid(event)
+        if uid not in self._pending_image_changes:
+            return
         pending = self._pending_image_changes.get(uid)
         if not pending:
             return

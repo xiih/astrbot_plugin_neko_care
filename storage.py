@@ -1,5 +1,7 @@
+import copy
 import json
 import threading
+import time
 from pathlib import Path
 from typing import Any, Dict
 
@@ -25,6 +27,11 @@ class JsonStore:
                 with self.path.open("r", encoding="utf-8") as f:
                     self.data = json.load(f)
             except Exception:
+                try:
+                    backup = self.path.with_suffix(f".broken.{int(time.time())}.json")
+                    self.path.replace(backup)
+                except Exception:
+                    pass
                 self.data = self._default()
                 self.save()
             for k, v in self._default().items():
@@ -45,7 +52,7 @@ class JsonStore:
                 if not isinstance(cur, dict) or key not in cur:
                     return default
                 cur = cur[key]
-            return cur
+            return copy.deepcopy(cur)
 
     def set(self, *keys, value):
         with self.lock:
