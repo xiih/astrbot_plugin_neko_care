@@ -175,7 +175,7 @@ class CatgirlService:
             f"心情：{int(first.get('mood', 85))}\n\n"
             f"2 分钟内发送：\n"
             f"「带她回家」或「确认收养」：就让她成为你的猫娘。\n"
-            f"「更换猫猫形象」或「换一只」：重新遇见另一位猫娘。\n\n"
+            f"「换个形象」或「换一只猫娘」：重新遇见另一位猫娘。\n\n"
             f"如果你害羞不回复，2 分钟后她也会默认跟你回家喔～"
         )
         return True, "pending", msg, first, second
