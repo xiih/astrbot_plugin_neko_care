@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>猫娘养成配置</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="topbar">
+        <div>
+          <h1>猫娘养成配置</h1>
+          <p id="subtitle">运行参数、内容池与收益规则</p>
+        </div>
+        <div class="actions">
+          <span id="saveState" class="state-pill">读取中</span>
+          <button id="resetBtn" class="ghost-button" type="button">恢复默认</button>
+          <button id="saveBtn" class="primary-button" type="button">保存应用</button>
+        </div>
+      </header>
+
+      <nav class="tabs" aria-label="配置分类">
+        <button class="tab active" data-tab="overview" type="button">概览</button>
+        <button class="tab" data-tab="users" type="button">用户数据</button>
+        <button class="tab" data-tab="economy" type="button">经济与许愿</button>
+        <button class="tab" data-tab="care" type="button">状态结算</button>
+        <button class="tab" data-tab="feed" type="button">喂食</button>
+        <button class="tab" data-tab="work" type="button">打工地点</button>
+        <button class="tab" data-tab="interactions" type="button">互动</button>
+        <button class="tab" data-tab="personalities" type="button">性格效果</button>
+      </nav>
+
+      <main>
+        <section id="overview" class="tab-panel active">
+          <div class="metrics" id="metrics"></div>
+          <div class="section-block">
+            <div class="section-heading">
+              <h2>当前规则</h2>
+            </div>
+            <div class="rule-grid" id="ruleGrid"></div>
+          </div>
+        </section>
+
+        <section id="users" class="tab-panel">
+          <div class="user-layout">
+            <aside class="user-list-panel">
+              <div class="section-heading">
+                <h2>用户列表</h2>
+                <button id="refreshUsers" class="ghost-button small" type="button">刷新</button>
+              </div>
+              <div class="user-tools">
+                <input id="userSearch" type="search" placeholder="搜索用户 ID、猫娘名、性格" />
+                <button id="addUser" class="ghost-button small" type="button">添加用户</button>
+              </div>
+              <div id="usersCount" class="muted-line"></div>
+              <div id="usersList" class="users-list"></div>
+            </aside>
+
+            <section class="user-detail-panel">
+              <div id="emptyUserState" class="empty-state">选择一个用户查看和修改数据</div>
+              <div id="userEditor" class="user-editor hidden">
+                <div class="editor-head">
+                  <div>
+                    <h2 id="editorTitle">用户数据</h2>
+                    <p id="editorSub">钱包、签到、猫娘状态和高级 JSON</p>
+                  </div>
+                  <div class="actions">
+                    <button id="deleteUser" class="danger-button" type="button">删除用户数据</button>
+                    <button id="saveUser" class="primary-button" type="button">保存用户</button>
+                  </div>
+                </div>
+
+                <div class="section-block">
+                  <div class="section-heading">
+                    <h2>基础数据</h2>
+                  </div>
+                  <div class="form-grid compact-grid">
+                    <label>用户 ID<input id="editUid" type="text" maxlength="128" /></label>
+                    <label>钱包余额<input id="editWallet" type="number" min="0" step="1" /></label>
+                    <label>签到次数<input data-user-path="sign.count" type="number" min="0" step="1" /></label>
+                    <label>最后签到日期<input data-user-path="sign.last_sign_date" type="text" placeholder="YYYY-MM-DD" /></label>
+                    <label>每日打工日期<input data-user-path="sign.last_work_date" type="text" placeholder="YYYY-MM-DD" /></label>
+                    <label>许愿日期<input data-user-path="sign.last_catgirl_wish_date" type="text" placeholder="YYYY-MM-DD" /></label>
+                    <label>许愿累计<input data-user-path="sign.catgirl_wish_count" type="number" min="0" step="1" /></label>
+                  </div>
+                </div>
+
+                <div class="section-block">
+                  <div class="section-heading">
+                    <h2>猫娘档案</h2>
+                    <label class="inline-check"><input id="catgirlEnabled" type="checkbox" /> 启用猫娘档案</label>
+                  </div>
+                  <div id="catgirlFields" class="catgirl-fields">
+                    <div class="summary-strip" id="catSummary"></div>
+                    <div class="form-grid compact-grid">
+                      <label>名字<input data-cat-path="name" type="text" maxlength="40" /></label>
+                      <label>性格<select data-cat-path="personality" id="personalitySelect"></select></label>
+                      <label>体型<select data-cat-path="body_type" id="bodyTypeSelect"></select></label>
+                      <label>形象路径<input data-cat-path="image" type="text" maxlength="240" /></label>
+                      <label>饱食度<input data-cat-path="satiety" type="number" min="0" max="100" step="0.1" /></label>
+                      <label>心情<input data-cat-path="mood" type="number" min="0" max="100" step="0.1" /></label>
+                      <label>健康<input data-cat-path="health" type="number" min="0" max="100" step="0.1" /></label>
+                      <label>精力<input data-cat-path="energy" type="number" min="0" max="100" step="0.1" /></label>
+                      <label>成长值<input data-cat-path="growth" type="number" min="0" step="1" /></label>
+                      <label>好感度<input data-cat-path="intimacy" type="number" min="0" step="1" /></label>
+                      <label>体重（斤）<input data-cat-path="weight" type="number" min="40" max="90" step="0.1" /></label>
+                      <label>理想体重（斤）<input data-cat-path="ideal_weight" type="number" min="40" max="90" step="0.1" /></label>
+                      <label>创建时间戳<input data-cat-path="created_at" type="number" min="0" step="1" /></label>
+                      <label>上次结算时间戳<input data-cat-path="last_decay" type="number" min="0" step="1" /></label>
+                    </div>
+
+                    <div class="section-subhead">
+                      <h3>当前打工</h3>
+                      <label class="inline-check"><input id="pendingWorkEnabled" type="checkbox" /> 保留打工状态</label>
+                    </div>
+                    <div id="pendingWorkFields" class="form-grid compact-grid">
+                      <label>地点<input data-work-path="job" type="text" maxlength="60" /></label>
+                      <label>开始时间戳<input data-work-path="started_at" type="number" min="0" step="1" /></label>
+                      <label>完成时间戳<input data-work-path="finish_at" type="number" min="0" step="1" /></label>
+                      <label>持续秒数<input data-work-path="duration" type="number" min="0" step="1" /></label>
+                      <label>报酬<input data-work-path="reward" type="number" min="0" step="1" /></label>
+                      <label>成长奖励<input data-work-path="growth_add" type="number" min="0" step="1" /></label>
+                      <label>好感奖励<input data-work-path="intimacy_add" type="number" min="0" step="1" /></label>
+                      <label>完成心情<input data-work-path="mood_reward" type="number" step="0.1" /></label>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="section-block">
+                  <div class="section-heading">
+                    <h2>高级数据</h2>
+                  </div>
+                  <div class="advanced-grid">
+                    <label>签到 JSON<textarea id="signJson" spellcheck="false"></textarea></label>
+                    <label>猫娘 JSON<textarea id="catJson" spellcheck="false"></textarea></label>
+                    <label>物品 JSON<textarea id="itemsJson" spellcheck="false"></textarea></label>
+                    <label>待收养 JSON<textarea id="pendingJson" spellcheck="false"></textarea></label>
+                  </div>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section id="economy" class="tab-panel">
+          <div class="form-grid compact-grid">
+            <label>货币名称<input data-path="economy.coin_name" type="text" maxlength="16" /></label>
+            <label>签到最小奖励<input data-path="economy.sign_min_reward" type="number" min="0" step="1" /></label>
+            <label>签到最大奖励<input data-path="economy.sign_max_reward" type="number" min="0" step="1" /></label>
+            <label>每日打工最小奖励<input data-path="economy.daily_work_min_reward" type="number" min="0" step="1" /></label>
+            <label>每日打工最大奖励<input data-path="economy.daily_work_max_reward" type="number" min="0" step="1" /></label>
+            <label>许愿成功概率<input data-path="wish.probability" type="number" min="0" max="1" step="0.01" /></label>
+            <label>许愿保底次数<input data-path="wish.pity" type="number" min="1" step="1" /></label>
+            <label>形象更换价格<input data-path="wish.appearance_change_price" type="number" min="0" step="1" /></label>
+          </div>
+          <div class="section-block">
+            <div class="section-heading">
+              <h2>每日打工事件</h2>
+              <button id="addDailyEvent" class="ghost-button small" type="button">添加事件</button>
+            </div>
+            <div id="dailyEvents" class="text-list"></div>
+          </div>
+        </section>
+
+        <section id="care" class="tab-panel">
+          <div class="form-grid">
+            <label>可喂食饱食度上限<input data-path="care.feed_satiety_limit" type="number" min="0" max="100" step="0.1" /></label>
+            <label>饱食度 100→0 分钟<input data-path="care.satiety_decay_minutes" type="number" min="1" step="1" /></label>
+            <label>心情每日下降<input data-path="care.mood_decay_per_day" type="number" min="0" step="0.1" /></label>
+            <label>精力每日恢复<input data-path="care.energy_recovery_per_day" type="number" min="0" step="0.1" /></label>
+            <label>饥饿健康每日下降<input data-path="care.health_hungry_decay_per_day" type="number" min="0" step="0.1" /></label>
+            <label>低心情健康每日下降<input data-path="care.health_low_mood_decay_per_day" type="number" min="0" step="0.1" /></label>
+            <label>健康每日恢复<input data-path="care.health_recovery_per_day" type="number" min="0" step="0.1" /></label>
+            <label>饥饿健康阈值<input data-path="care.health_hungry_satiety_threshold" type="number" min="0" max="100" step="0.1" /></label>
+            <label>低心情健康阈值<input data-path="care.health_low_mood_threshold" type="number" min="0" max="100" step="0.1" /></label>
+            <label>饱食归零离家小时<input data-path="care.runaway_after_zero_hours" type="number" min="1" step="0.1" /></label>
+            <label>每日互动软上限<input data-path="care.interaction_daily_limit" type="number" min="0" step="1" /></label>
+            <label>互动冷却秒数<input data-path="care.interaction_cooldown_seconds" type="number" min="0" step="1" /></label>
+            <label>互动基础精力消耗<input data-path="care.interaction_energy_cost" type="number" min="0" max="100" step="1" /></label>
+            <label>轻度递减额外次数<input data-path="care.interaction_soft_limit_extra" type="number" min="0" step="1" /></label>
+            <label>重度递减额外次数<input data-path="care.interaction_heavy_limit_extra" type="number" min="0" step="1" /></label>
+            <label>轻度递减倍率<input data-path="care.interaction_soft_limit_multiplier" type="number" min="0" step="0.01" /></label>
+            <label>重度递减倍率<input data-path="care.interaction_heavy_limit_multiplier" type="number" min="0" step="0.01" /></label>
+            <label>极低递减倍率<input data-path="care.interaction_minimal_limit_multiplier" type="number" min="0" step="0.01" /></label>
+            <label>高心情阈值<input data-path="care.interaction_good_mood_threshold" type="number" min="0" max="100" step="0.1" /></label>
+            <label>低心情阈值<input data-path="care.interaction_low_mood_threshold" type="number" min="0" max="100" step="0.1" /></label>
+            <label>危险心情阈值<input data-path="care.interaction_bad_mood_threshold" type="number" min="0" max="100" step="0.1" /></label>
+            <label>高心情互动倍率<input data-path="care.interaction_high_mood_multiplier" type="number" min="0" step="0.01" /></label>
+            <label>低心情互动倍率<input data-path="care.interaction_low_mood_multiplier" type="number" min="0" step="0.01" /></label>
+            <label>危险心情互动倍率<input data-path="care.interaction_bad_mood_multiplier" type="number" min="0" step="0.01" /></label>
+            <label>健康喂食正常阈值<input data-path="care.feed_healthy_threshold" type="number" min="0" max="100" step="0.1" /></label>
+            <label>低健康喂食阈值<input data-path="care.feed_low_health_threshold" type="number" min="0" max="100" step="0.1" /></label>
+            <label>危险健康喂食阈值<input data-path="care.feed_bad_health_threshold" type="number" min="0" max="100" step="0.1" /></label>
+            <label>低健康喂食倍率<input data-path="care.feed_low_health_multiplier" type="number" min="0" step="0.01" /></label>
+            <label>危险健康喂食倍率<input data-path="care.feed_bad_health_multiplier" type="number" min="0" step="0.01" /></label>
+            <label>重病喂食倍率<input data-path="care.feed_critical_health_multiplier" type="number" min="0" step="0.01" /></label>
+            <label>稳定打工精力阈值<input data-path="care.work_stable_energy_threshold" type="number" min="0" max="100" step="0.1" /></label>
+            <label>高收益打工精力阈值<input data-path="care.work_high_energy_threshold" type="number" min="0" max="100" step="0.1" /></label>
+            <label>稳定打工报酬倍率<input data-path="care.work_stable_energy_reward_multiplier" type="number" min="0" step="0.01" /></label>
+            <label>高精力打工报酬倍率<input data-path="care.work_high_energy_reward_multiplier" type="number" min="0" step="0.01" /></label>
+            <label>打工最低健康<input data-path="care.work_min_health" type="number" min="0" max="100" step="0.1" /></label>
+            <label>打工最低饱食<input data-path="care.work_min_satiety" type="number" min="0" max="100" step="0.1" /></label>
+            <label>打工最低心情<input data-path="care.work_min_mood" type="number" min="0" max="100" step="0.1" /></label>
+            <label>互动最低健康<input data-path="care.interact_min_health" type="number" min="0" max="100" step="0.1" /></label>
+          </div>
+        </section>
+
+        <section id="feed" class="tab-panel">
+          <div class="form-grid compact-grid">
+            <label>饱食增加最小<input data-path="feed.satiety_add_min" type="number" min="0" step="1" /></label>
+            <label>饱食增加最大<input data-path="feed.satiety_add_max" type="number" min="0" step="1" /></label>
+            <label>心情增加最小<input data-path="feed.mood_add_min" type="number" min="0" step="1" /></label>
+            <label>心情增加最大<input data-path="feed.mood_add_max" type="number" min="0" step="1" /></label>
+            <label>健康增加最小<input data-path="feed.health_add_min" type="number" min="0" step="1" /></label>
+            <label>健康增加最大<input data-path="feed.health_add_max" type="number" min="0" step="1" /></label>
+            <label>精力增加最小<input data-path="feed.energy_add_min" type="number" min="0" step="1" /></label>
+            <label>精力增加最大<input data-path="feed.energy_add_max" type="number" min="0" step="1" /></label>
+            <label>成长增加最小<input data-path="feed.growth_add_min" type="number" min="0" step="1" /></label>
+            <label>成长增加最大<input data-path="feed.growth_add_max" type="number" min="0" step="1" /></label>
+            <label>亲密增加最小<input data-path="feed.intimacy_add_min" type="number" min="0" step="1" /></label>
+            <label>亲密增加最大<input data-path="feed.intimacy_add_max" type="number" min="0" step="1" /></label>
+          </div>
+          <div class="section-block">
+            <div class="section-heading">
+              <h2>食物池</h2>
+              <button id="addFood" class="ghost-button small" type="button">添加食物</button>
+            </div>
+            <div id="foodsTable" class="table-wrap"></div>
+          </div>
+        </section>
+
+        <section id="work" class="tab-panel">
+          <div class="form-grid compact-grid">
+            <label>阶段基础倍率<input data-path="work.reward_stage_base" type="number" min="0" step="0.01" /></label>
+            <label>每阶段加成<input data-path="work.reward_stage_step" type="number" min="0" step="0.01" /></label>
+          </div>
+          <div class="section-heading">
+            <h2>打工地点</h2>
+            <button id="addJob" class="ghost-button small" type="button">添加地点</button>
+          </div>
+          <div id="jobsTable" class="table-wrap"></div>
+        </section>
+
+        <section id="interactions" class="tab-panel">
+          <div class="section-heading">
+            <h2>互动动作</h2>
+            <button id="addInteraction" class="ghost-button small" type="button">添加互动</button>
+          </div>
+          <div id="interactionsTable" class="table-wrap"></div>
+        </section>
+
+        <section id="personalities" class="tab-panel">
+          <div class="section-heading">
+            <h2>性格效果</h2>
+          </div>
+          <div id="personalitiesTable" class="table-wrap"></div>
+        </section>
+      </main>
+    </div>
+
+    <div id="toast" class="toast" role="status"></div>
+    <script src="./app.js"></script>
+  </body>
+</html>

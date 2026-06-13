@@ -1,7 +1,7 @@
 import random
 from datetime import datetime
 from pathlib import Path
-from typing import Tuple
+from typing import Callable, Dict, Tuple
 
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
@@ -51,6 +51,7 @@ class SignService:
         font_dir: Path,
         cache_dir: Path,
         quote_file: Path,
+        runtime_config_provider: Callable[[], Dict] | None = None,
     ):
         self.store = store
         self.economy = economy
@@ -62,6 +63,27 @@ class SignService:
         self.font_dir = Path(font_dir)
         self.cache_dir = Path(cache_dir)
         self.quote_file = Path(quote_file)
+        self.runtime_config_provider = runtime_config_provider
+
+    def _runtime(self) -> Dict:
+        if callable(self.runtime_config_provider):
+            try:
+                data = self.runtime_config_provider()
+                if isinstance(data, dict):
+                    return data
+            except Exception:
+                pass
+        return {}
+
+    def _economy_rules(self) -> Dict:
+        rules = self._runtime().get("economy", {})
+        return rules if isinstance(rules, dict) else {}
+
+    def _sign_reward_range(self) -> Tuple[int, int]:
+        rules = self._economy_rules()
+        low = max(0, int(rules.get("sign_min_reward", self.sign_min)))
+        high = max(low, int(rules.get("sign_max_reward", self.sign_max)))
+        return low, high
 
     def _random_quote(self) -> Tuple[str, str]:
         try:
@@ -84,7 +106,8 @@ class SignService:
 
     def sign(self, uid: str, nickname: str):
         today = today_str()
-        inc = random.randint(self.sign_min, self.sign_max)
+        sign_min, sign_max = self._sign_reward_range()
+        inc = random.randint(sign_min, sign_max)
         quote, quote_from = self._random_quote()
 
         def op(root):
@@ -200,6 +223,7 @@ class SignService:
         today = today_str()
         out = self.cache_dir / f"sign_{uid}_{today}.png"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        coin_name = str(self._economy_rules().get("coin_name") or self.coin_name or "宝石")
 
         canvas_w, canvas_h = 1920, 1080
         back = self._pick_background()
@@ -236,8 +260,8 @@ class SignService:
         shift_y = -45
         hword = hour_word()
         self._outlined_text(draw, (70, 280 + shift_y), hword, font_big, anchor="lm", stroke=4)
-        self._outlined_text(draw, (72, 450 + shift_y), f"{self.coin_name}  +{inc}", font_mid, anchor="lm", stroke=4)
-        self._outlined_text(draw, (72, 710 + shift_y), f"{self.coin_name}：{balance}", font_mid, anchor="lm", stroke=4)
+        self._outlined_text(draw, (72, 450 + shift_y), f"{coin_name}  +{inc}", font_mid, anchor="lm", stroke=4)
+        self._outlined_text(draw, (72, 710 + shift_y), f"{coin_name}：{balance}", font_mid, anchor="lm", stroke=4)
         self._outlined_text(draw, (72, 820 + shift_y), datetime.now().strftime("%Y.%m.%d"), font_date, anchor="lm", stroke=4)
 
         if not quote:

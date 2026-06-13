@@ -19,6 +19,7 @@ from .storage import JsonStore
 from .economy import EconomyService
 from .sign import SignService
 from .catgirl import CatgirlService
+from .runtime_config import NekoRuntimeConfig
 
 
 PLUGIN_NAME = "astrbot_plugin_neko_care"
@@ -67,7 +68,7 @@ def neko_command(command_name: str, alias: set | None = None, **kwargs):
 
     return decorator
 
-@register("astrbot_plugin_neko_care", "若梦", "猫娘养成、签到打工", "1.0.3")
+@register("astrbot_plugin_neko_care", "若梦和我一起", "猫娘羁绊养成、签到打工", "1.3.0")
 class SapphireEconomyPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -112,20 +113,82 @@ class SapphireEconomyPlugin(Star):
         self._ensure_default_quote_file()
 
         self.store = JsonStore(self.data_dir / "store.json")
-        self.economy = EconomyService(self.store, self.coin_name, self.work_min, self.work_max)
+        self.runtime_config = NekoRuntimeConfig(self.data_dir / "runtime_config.json", self.config)
+        self._apply_runtime_config()
+
+        self.economy = EconomyService(self.store, self.coin_name, self.work_min, self.work_max, self.runtime_config.snapshot)
         self.sign = SignService(
             self.store, self.economy, self.coin_name, self.sign_min, self.sign_max,
-            self.base_dir, self.background_dir, self.font_dir, self.cache_dir, self.quote_file
+            self.base_dir, self.background_dir, self.font_dir, self.cache_dir, self.quote_file, self.runtime_config.snapshot
         )
         self.catgirl = CatgirlService(
             self.store, self.economy, self.coin_name, self.base_dir, self.catgirl_dir,
-            self.upload_dir, self.font_dir, self.cache_dir, self.wish_probability, self.wish_pity, self.appearance_change_price
+            self.upload_dir, self.font_dir, self.cache_dir, self.wish_probability, self.wish_pity, self.appearance_change_price,
+            self.runtime_config.snapshot
         )
+        self.page_api = None
+        self._register_page_api_if_available()
 
         self._pending_adoptions = {}
         global PENDING_IMAGE_CHANGES
         self._pending_image_changes = PENDING_IMAGE_CHANGES
         self._background_tasks = set()
+
+    def _runtime_snapshot(self) -> dict:
+        runtime_config = getattr(self, "runtime_config", None)
+        if runtime_config is None:
+            return {}
+        try:
+            return runtime_config.snapshot()
+        except Exception:
+            return {}
+
+    def _apply_runtime_config(self) -> None:
+        data = self._runtime_snapshot()
+        economy = data.get("economy", {}) if isinstance(data.get("economy"), dict) else {}
+        wish = data.get("wish", {}) if isinstance(data.get("wish"), dict) else {}
+        self.coin_name = str(economy.get("coin_name") or self.coin_name or "宝石")[:16] or "宝石"
+        self.sign_min = max(0, int(economy.get("sign_min_reward", self.sign_min)))
+        self.sign_max = max(self.sign_min, int(economy.get("sign_max_reward", self.sign_max)))
+        self.work_min = max(0, int(economy.get("daily_work_min_reward", self.work_min)))
+        self.work_max = max(self.work_min, int(economy.get("daily_work_max_reward", self.work_max)))
+        self.wish_probability = min(1.0, max(0.0, float(wish.get("probability", self.wish_probability))))
+        self.wish_pity = max(1, int(wish.get("pity", self.wish_pity)))
+        self.appearance_change_price = max(0, int(wish.get("appearance_change_price", self.appearance_change_price)))
+
+        for service in (getattr(self, "economy", None), getattr(self, "sign", None), getattr(self, "catgirl", None)):
+            if service is not None and hasattr(service, "coin_name"):
+                service.coin_name = self.coin_name
+
+    def _coin_name(self) -> str:
+        data = self._runtime_snapshot()
+        economy = data.get("economy", {}) if isinstance(data.get("economy"), dict) else {}
+        return str(economy.get("coin_name") or self.coin_name or "宝石")
+
+    def _care_rules(self) -> dict:
+        data = self._runtime_snapshot()
+        care = data.get("care", {}) if isinstance(data.get("care"), dict) else {}
+        return care
+
+    def _wish_rules(self) -> tuple[float, int, int]:
+        data = self._runtime_snapshot()
+        wish = data.get("wish", {}) if isinstance(data.get("wish"), dict) else {}
+        return (
+            min(1.0, max(0.0, float(wish.get("probability", self.wish_probability)))),
+            max(1, int(wish.get("pity", self.wish_pity))),
+            max(0, int(wish.get("appearance_change_price", self.appearance_change_price))),
+        )
+
+    def _register_page_api_if_available(self) -> None:
+        try:
+            if not callable(getattr(self.context, "register_web_api", None)):
+                return
+            from .page_api import NekoCarePageApi
+
+            self.page_api = NekoCarePageApi(self)
+            self.page_api.register_routes()
+        except Exception:
+            self.page_api = None
 
     def _ensure_default_quote_file(self):
         if self.quote_file.exists():
@@ -230,14 +293,11 @@ class SapphireEconomyPlugin(Star):
 
 
     def _mixed_result(self, event: AstrMessageEvent, text: str, img_path: Optional[Path] = None):
-        if img_path and Plain is not None and Image is not None:
+        if img_path:
             try:
-                return event.chain_result([Image.fromFileSystem(str(img_path)), Plain("\n" + text)])
+                return event.image_result(str(img_path))
             except Exception:
-                try:
-                    return event.chain_result([Plain(text + "\n"), Image.fromFileSystem(str(img_path))])
-                except Exception:
-                    pass
+                pass
         return event.plain_result(text)
 
     async def _auto_finalize_adoption(self, uid: str, token: str, gid: str):
@@ -246,31 +306,36 @@ class SapphireEconomyPlugin(Star):
         pending = self._pending_adoptions.get(key)
         if not pending or pending.get("token") != token:
             return
-        first = pending.get("first")
-        if first:
-            self.catgirl.finalize_adoption(gid, uid, first)
+        self.catgirl.finalize_adoption(gid, uid, choice="first")
         self._pending_adoptions.pop(key, None)
 
     @neko_command("猫猫帮助", alias={"猫娘帮助"})
     async def catgirl_help(self, event: AstrMessageEvent):
+        coin_name = self._coin_name()
+        wish_probability, wish_pity, appearance_price = self._wish_rules()
+        care = self._care_rules()
+        feed_limit = care.get("feed_satiety_limit", 85)
+        satiety_minutes = int(float(care.get("satiety_decay_minutes", 2880)))
+        runaway_hours = float(care.get("runaway_after_zero_hours", 24))
         text = (
             "猫猫小助手来啦 ฅ^•ﻌ•^ฅ\n\n"
             "常用指令：\n"
             "1. 签到 / 猫猫签到\n"
             "2. 查看猫猫钱包 / 查看猫娘钱包\n"
             "3. 请赐我一只可爱猫娘吧\n"
-            "4. 猫娘状态 / 猫猫状态\n"
+            "4. 成长档案 / 猫娘状态 / 猫猫状态\n"
             "5. 喂猫 / 喂猫娘 / 喂猫猫\n"
-            "6. 猫娘打工 / 猫猫打工\n"
+            "6. 猫娘打工 / 猫猫打工 / 打工（可加地点名；猫娘打工 列表）\n"
             "7. 撸猫 / 逗猫 / 摸猫 / rua猫 / 陪猫娘\n"
+            "   自定义互动：猫娘互动 动作名\n"
             "8. 猫娘改名 名字\n"
-            f"9. 更换猫娘形象 + 图片（{self.appearance_change_price} {self.coin_name}）\n"
-            "10. 猫娘排行榜\n"
+            f"9. 更换猫娘形象 + 图片（{appearance_price} {coin_name}）\n"
+            "10. 羁绊排行榜 / 猫娘排行榜\n"
             "许愿说明：\n"
-            f"每天许愿有 {int(self.wish_probability * 100)}% 概率遇见猫娘，{self.wish_pity} 次内必定成功喔～\n\n"
-            "喂养时间：\n"
-            "05:00-12:00 可以喂一次\n"
-            "12:00-02:00 可以喂一次"
+            f"每天许愿有 {int(wish_probability * 100)}% 概率遇见猫娘，{wish_pity} 次内必定成功喔～\n\n"
+            "喂养说明：\n"
+            f"状态按分钟结算，饱食度低于 {round(feed_limit)} 时可以喂猫。\n"
+            f"饱食度约 {round(satiety_minutes / 60)} 小时从 100 降到 0，归零超过 {round(runaway_hours)} 小时会离家出走。"
         )
         yield event.plain_result(text)
 
@@ -278,7 +343,7 @@ class SapphireEconomyPlugin(Star):
     async def my_wallet(self, event: AstrMessageEvent):
         uid = self._uid(event)
         bal = self.economy.get_balance(uid)
-        yield event.plain_result(f"你的小钱包里有 {bal} {self.coin_name} 喔～")
+        yield event.plain_result(f"你的小钱包里有 {bal} {self._coin_name()} 喔～")
 
     @neko_command("钱包转账")
     async def wallet_transfer(self, event: AstrMessageEvent, amount: int):
@@ -290,7 +355,7 @@ class SapphireEconomyPlugin(Star):
         ok, msg = self.economy.transfer(uid, target, amount)
         yield event.plain_result(msg)
 
-    @neko_command("打工", alias={"每日打工"})
+    @neko_command("每日打工")
     async def daily_work(self, event: AstrMessageEvent):
         uid = self._uid(event)
         ok, msg = self.economy.daily_work(uid)
@@ -312,20 +377,22 @@ class SapphireEconomyPlugin(Star):
                 yield event.image_result(str(img_path))
                 return
             except Exception as e:
-                yield event.plain_result(f"签到成功啦，但图片生成失败：{e}\n你获得了 {data['inc']} {self.coin_name}，现在有 {data['balance']} {self.coin_name} 喔～")
+                coin_name = self._coin_name()
+                yield event.plain_result(f"签到成功啦，但图片生成失败：{e}\n你获得了 {data['inc']} {coin_name}，现在有 {data['balance']} {coin_name} 喔～")
                 return
 
         quote_line = data.get("quote", "")
         quote_from = data.get("quote_from", "")
         if quote_from:
             quote_line = f"{quote_line}\n—— {quote_from}"
-        yield event.plain_result(f"签到成功喵～ ฅ^•ﻌ•^ฅ\n今天捡到了 {data['inc']} {self.coin_name}！\n小钱包里现在有 {data['balance']} {self.coin_name} 啦～\n\n今日一言：\n{quote_line}")
+        coin_name = self._coin_name()
+        yield event.plain_result(f"签到成功喵～ ฅ^•ﻌ•^ฅ\n今天捡到了 {data['inc']} {coin_name}！\n小钱包里现在有 {data['balance']} {coin_name} 啦～\n\n今日一言：\n{quote_line}")
 
     @neko_command("请赐我一只可爱猫娘吧")
     async def wish_catgirl(self, event: AstrMessageEvent):
         uid = self._uid(event)
         gid = self._gid(event)
-        ok, status, msg, first, second = self.catgirl.prepare_wish(uid)
+        ok, status, msg, first, second = self.catgirl.prepare_wish(uid, gid)
         if not ok:
             yield event.plain_result(msg)
             return
@@ -342,7 +409,7 @@ class SapphireEconomyPlugin(Star):
         task = asyncio.create_task(self._auto_finalize_adoption(uid, token, gid))
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
-        img = self.catgirl.image_path(first)
+        img = self.catgirl.draw_wish_card(first)
         yield self._mixed_result(event, msg, img)
 
     @neko_command("带她回家", alias={"确认收养", "换一只猫娘", "换个形象"})
@@ -350,20 +417,16 @@ class SapphireEconomyPlugin(Star):
         uid = self._uid(event)
         gid = self._gid(event)
         raw = (event.message_str or "").strip()
-        pending = self._pending_adoptions.get(uid)
-        if not pending or time.time() > float(pending.get("expire", 0)):
+        pending = self._pending_adoptions.get(uid) or self.catgirl.get_pending_adoption(uid)
+        if not pending:
             return
 
-        if raw in ("换一只猫娘", "换个形象"):
-            cat = pending.get("second") or pending.get("first")
-        else:
-            cat = pending.get("first")
-
-        ok, msg, img = self.catgirl.finalize_adoption(gid, uid, cat)
+        choice = "second" if raw in ("换一只猫娘", "换个形象") else "first"
+        ok, msg, img = self.catgirl.finalize_adoption(gid, uid, choice=choice)
         self._pending_adoptions.pop(uid, None)
         yield self._mixed_result(event, msg, img)
 
-    @neko_command("猫娘状态", alias={"猫猫状态"})
+    @neko_command("成长档案", alias={"猫娘状态", "猫猫状态", "猫猫档案"})
     async def catgirl_status(self, event: AstrMessageEvent):
         uid = self._uid(event)
         ok, msg, img_path = self.catgirl.status(uid)
@@ -375,11 +438,11 @@ class SapphireEconomyPlugin(Star):
         ok, msg, img_path = self.catgirl.feed(uid)
         yield self._mixed_result(event, msg, img_path)
 
-    @neko_command("猫娘打工", alias={"猫猫打工"})
-    async def catgirl_work(self, event: AstrMessageEvent):
+    @neko_command("猫娘打工", alias={"猫猫打工", "打工"})
+    async def catgirl_work(self, event: AstrMessageEvent, job_name: GreedyStr):
         uid = self._uid(event)
-        ok, msg = self.catgirl.work(uid)
-        yield event.plain_result(msg)
+        ok, msg, img = self.catgirl.work(uid, str(job_name or "").strip())
+        yield self._mixed_result(event, msg, img)
 
     @neko_command("撸猫", alias={"逗猫", "摸猫", "rua猫", "陪猫娘", "陪猫猫", "贴贴猫娘", "贴贴猫猫"})
     async def interact_catgirl(self, event: AstrMessageEvent):
@@ -388,11 +451,21 @@ class SapphireEconomyPlugin(Star):
         ok, msg, img = self.catgirl.interact(uid, action)
         yield self._mixed_result(event, msg, img)
 
+    @neko_command("猫娘互动", alias={"猫猫互动"})
+    async def interact_catgirl_custom(self, event: AstrMessageEvent, action: GreedyStr):
+        uid = self._uid(event)
+        action = str(action or "").strip()
+        if not action:
+            yield event.plain_result("请输入要进行的互动动作。")
+            return
+        ok, msg, img = self.catgirl.interact(uid, action)
+        yield self._mixed_result(event, msg, img)
+
     @neko_command("猫娘改名")
     async def rename_catgirl(self, event: AstrMessageEvent, name: GreedyStr):
         uid = self._uid(event)
-        ok, msg = self.catgirl.rename(uid, name)
-        yield event.plain_result(msg)
+        ok, msg, img = self.catgirl.rename(uid, name)
+        yield self._mixed_result(event, msg, img)
 
     @neko_command("更换猫娘形象", alias={"更换猫猫形象"})
     async def change_catgirl_image(self, event: AstrMessageEvent):
@@ -407,7 +480,8 @@ class SapphireEconomyPlugin(Star):
         if not image_src:
             token = f"{time.time()}:{random.random()}"
             self._pending_image_changes[uid] = {"token": token, "expire": time.time() + 120}
-            yield event.plain_result(f"请在 2 分钟内发送新的猫娘图片～\n成功更换后将扣除 {self.catgirl.appearance_change_price} {self.coin_name}。")
+            _, _, appearance_price = self._wish_rules()
+            yield event.plain_result(f"请在 2 分钟内发送新的猫娘图片～\n成功更换后将扣除 {appearance_price} {self._coin_name()}。")
             return
 
         ok, msg, img = await self.catgirl.change_image(uid, image_src)
@@ -434,12 +508,12 @@ class SapphireEconomyPlugin(Star):
         yield self._mixed_result(event, msg, img)
 
 
-    @neko_command("猫娘排行榜", alias={"猫猫排行榜"})
+    @neko_command("羁绊排行榜", alias={"猫娘排行榜", "猫猫排行榜"})
     async def catgirl_rank(self, event: AstrMessageEvent):
         gid = self._gid(event)
         img = self.catgirl.draw_rank(gid)
         if not img:
-            yield event.plain_result("本群还没有猫娘喔～发送「请赐我一只可爱猫娘吧」试试看。")
+            yield event.plain_result("本群还没有登记猫娘喔～发送「请赐我一只可爱猫娘吧」试试看。")
             return
         yield event.image_result(str(img))
 
@@ -456,32 +530,39 @@ class SapphireEconomyPlugin(Star):
         if not rows:
             yield event.plain_result("还没有人有钱钱喔～")
             return
-        lines = [f"💰 {self.coin_name}排行榜 TOP 10\n"]
+        coin_name = self._coin_name()
+        lines = [f"💰 {coin_name}排行榜 TOP 10\n"]
         for i, row in enumerate(rows, 1):
-            lines.append(f"{i}. {row['uid']}: {row['balance']} {self.coin_name}")
+            lines.append(f"{i}. {row['uid']}: {row['balance']} {coin_name}")
         yield event.plain_result("\n".join(lines))
 
     @neko_command("管理员给")
     async def admin_give(self, event: AstrMessageEvent, amount: int):
         if not self._is_admin(event):
             return
+        if amount <= 0:
+            yield event.plain_result("金额要大于 0。")
+            return
         target = self._extract_at_uid(event)
         if not target:
             yield event.plain_result("要 @ 目标用户喔～")
             return
         self.economy.add_balance(target, amount)
-        yield event.plain_result(f"已给 {target} 添加 {amount} {self.coin_name}。")
+        yield event.plain_result(f"已给 {target} 添加 {amount} {self._coin_name()}。")
 
     @neko_command("管理员扣")
     async def admin_deduct(self, event: AstrMessageEvent, amount: int):
         if not self._is_admin(event):
+            return
+        if amount <= 0:
+            yield event.plain_result("金额要大于 0。")
             return
         target = self._extract_at_uid(event)
         if not target:
             yield event.plain_result("要 @ 目标用户喔～")
             return
         self.economy.add_balance(target, -amount)
-        yield event.plain_result(f"已从 {target} 扣除 {amount} {self.coin_name}。")
+        yield event.plain_result(f"已从 {target} 扣除 {amount} {self._coin_name()}。")
 
     @neko_command("管理员查看")
     async def admin_check(self, event: AstrMessageEvent):
@@ -492,4 +573,4 @@ class SapphireEconomyPlugin(Star):
             yield event.plain_result("要 @ 目标用户喔～")
             return
         bal = self.economy.get_balance(target)
-        yield event.plain_result(f"用户 {target} 当前余额：{bal} {self.coin_name}")
+        yield event.plain_result(f"用户 {target} 当前余额：{bal} {self._coin_name()}")
