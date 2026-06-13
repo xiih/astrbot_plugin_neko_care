@@ -7,6 +7,7 @@ from typing import Optional
 
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register, StarTools
+from astrbot.core.star.filter.command import GreedyStr
 
 try:
     from astrbot.api.message_components import Plain, Image
@@ -21,7 +22,50 @@ from .catgirl import CatgirlService
 
 
 PLUGIN_NAME = "astrbot_plugin_neko_care"
+KEYWORD_TRIGGER_ENABLED = True
+PENDING_IMAGE_CHANGES = {}
 
+
+def pending_image_filter():
+    class PendingImageFilter(filter.CustomFilter):
+        def filter(self, event: AstrMessageEvent, cfg) -> bool:
+            uid = str(event.get_sender_id())
+            if uid not in PENDING_IMAGE_CHANGES:
+                return False
+            event.is_at_or_wake_command = True
+            event.is_wake = True
+            return True
+
+    return PendingImageFilter
+
+
+def keyword_command_filter(*command_names: str):
+    class KeywordCommandFilter(filter.CustomFilter):
+        def filter(self, event: AstrMessageEvent, cfg) -> bool:
+            if event.is_at_or_wake_command:
+                return True
+            if not KEYWORD_TRIGGER_ENABLED:
+                return True
+
+            message = re.sub(r"\s+", " ", event.get_message_str().strip())
+            for command_name in command_names:
+                if message == command_name or message.startswith(f"{command_name} "):
+                    event.is_at_or_wake_command = True
+                    event.is_wake = True
+                    return True
+            return True
+
+    return KeywordCommandFilter
+
+
+def neko_command(command_name: str, alias: set | None = None, **kwargs):
+    command_names = [command_name, *(alias or set())]
+
+    def decorator(awaitable):
+        awaitable = filter.custom_filter(keyword_command_filter(*command_names), False)(awaitable)
+        return filter.command(command_name, alias=alias, **kwargs)(awaitable)
+
+    return decorator
 
 @register("astrbot_plugin_neko_care", "若梦", "猫娘养成、签到打工", "1.0.3")
 class SapphireEconomyPlugin(Star):
@@ -32,6 +76,8 @@ class SapphireEconomyPlugin(Star):
         self.coin_name = str(self.config.get("coin_name", "宝石"))[:16] or "宝石"
         self.sign_mode = "图片签到" if self.config.get("sign_mode", "图片签到") in ("图片签到", "image") else "文字签到"
         self.keyword_trigger_enabled = bool(self.config.get("keyword_trigger_enabled", True))
+        global KEYWORD_TRIGGER_ENABLED
+        KEYWORD_TRIGGER_ENABLED = self.keyword_trigger_enabled
 
         self.sign_min = max(0, int(self.config.get("sign_min_reward", 80)))
         self.sign_max = max(self.sign_min, int(self.config.get("sign_max_reward", 150)))
@@ -77,7 +123,8 @@ class SapphireEconomyPlugin(Star):
         )
 
         self._pending_adoptions = {}
-        self._pending_image_changes = {}
+        global PENDING_IMAGE_CHANGES
+        self._pending_image_changes = PENDING_IMAGE_CHANGES
         self._background_tasks = set()
 
     def _ensure_default_quote_file(self):
@@ -204,7 +251,7 @@ class SapphireEconomyPlugin(Star):
             self.catgirl.finalize_adoption(gid, uid, first)
         self._pending_adoptions.pop(key, None)
 
-    @filter.regex(r"^(猫猫帮助|猫娘帮助)$")
+    @neko_command("猫猫帮助", alias={"猫娘帮助"})
     async def catgirl_help(self, event: AstrMessageEvent):
         text = (
             "猫猫小助手来啦 ฅ^•ﻌ•^ฅ\n\n"
@@ -216,7 +263,7 @@ class SapphireEconomyPlugin(Star):
             "5. 喂猫 / 喂猫娘 / 喂猫猫\n"
             "6. 猫娘打工 / 猫猫打工\n"
             "7. 撸猫 / 逗猫 / 摸猫 / rua猫 / 陪猫娘\n"
-            "8. 猫娘改名叫xxx\n"
+            "8. 猫娘改名 名字\n"
             f"9. 更换猫娘形象 + 图片（{self.appearance_change_price} {self.coin_name}）\n"
             "10. 猫娘排行榜\n"
             "许愿说明：\n"
@@ -227,31 +274,29 @@ class SapphireEconomyPlugin(Star):
         )
         yield event.plain_result(text)
 
-    @filter.regex(r"^(查看猫猫钱包|查看猫娘钱包)$")
+    @neko_command("查看猫猫钱包", alias={"查看猫娘钱包"})
     async def my_wallet(self, event: AstrMessageEvent):
         uid = self._uid(event)
         bal = self.economy.get_balance(uid)
         yield event.plain_result(f"你的小钱包里有 {bal} {self.coin_name} 喔～")
 
-    @filter.regex(r"^钱包转账\s*(\d+)")
-    async def wallet_transfer(self, event: AstrMessageEvent):
+    @neko_command("钱包转账")
+    async def wallet_transfer(self, event: AstrMessageEvent, amount: int):
         uid = self._uid(event)
         target = self._extract_at_uid(event)
-        m = re.search(r"^钱包转账\s*(\d+)", event.message_str or "")
-        amount = int(m.group(1)) if m else 0
         if not target:
             yield event.plain_result("要 @ 想转账的小伙伴喔～")
             return
         ok, msg = self.economy.transfer(uid, target, amount)
         yield event.plain_result(msg)
 
-    @filter.regex(r"^(打工|每日打工)$")
+    @neko_command("打工", alias={"每日打工"})
     async def daily_work(self, event: AstrMessageEvent):
         uid = self._uid(event)
         ok, msg = self.economy.daily_work(uid)
         yield event.plain_result(msg)
 
-    @filter.regex(r"^(签到|猫猫签到)$")
+    @neko_command("签到", alias={"猫猫签到"})
     async def sign_entry(self, event: AstrMessageEvent):
         uid = self._uid(event)
         name = self._name(event)
@@ -276,7 +321,7 @@ class SapphireEconomyPlugin(Star):
             quote_line = f"{quote_line}\n—— {quote_from}"
         yield event.plain_result(f"签到成功喵～ ฅ^•ﻌ•^ฅ\n今天捡到了 {data['inc']} {self.coin_name}！\n小钱包里现在有 {data['balance']} {self.coin_name} 啦～\n\n今日一言：\n{quote_line}")
 
-    @filter.regex(r"^请赐我一只可爱猫娘吧$")
+    @neko_command("请赐我一只可爱猫娘吧")
     async def wish_catgirl(self, event: AstrMessageEvent):
         uid = self._uid(event)
         gid = self._gid(event)
@@ -300,7 +345,7 @@ class SapphireEconomyPlugin(Star):
         img = self.catgirl.image_path(first)
         yield self._mixed_result(event, msg, img)
 
-    @filter.regex(r"^(带她回家|确认收养|换一只猫娘|换个形象)$")
+    @neko_command("带她回家", alias={"确认收养", "换一只猫娘", "换个形象"})
     async def confirm_catgirl_adoption(self, event: AstrMessageEvent):
         uid = self._uid(event)
         gid = self._gid(event)
@@ -318,40 +363,38 @@ class SapphireEconomyPlugin(Star):
         self._pending_adoptions.pop(uid, None)
         yield self._mixed_result(event, msg, img)
 
-    @filter.regex(r"^(猫娘状态|猫猫状态)$")
+    @neko_command("猫娘状态", alias={"猫猫状态"})
     async def catgirl_status(self, event: AstrMessageEvent):
         uid = self._uid(event)
         ok, msg, img_path = self.catgirl.status(uid)
         yield self._mixed_result(event, msg, img_path)
 
-    @filter.regex(r"^(喂猫|喂猫娘|喂猫猫)$")
+    @neko_command("喂猫", alias={"喂猫娘", "喂猫猫"})
     async def feed_catgirl(self, event: AstrMessageEvent):
         uid = self._uid(event)
         ok, msg, img_path = self.catgirl.feed(uid)
         yield self._mixed_result(event, msg, img_path)
 
-    @filter.regex(r"^(猫娘打工|猫猫打工)$")
+    @neko_command("猫娘打工", alias={"猫猫打工"})
     async def catgirl_work(self, event: AstrMessageEvent):
         uid = self._uid(event)
         ok, msg = self.catgirl.work(uid)
         yield event.plain_result(msg)
 
-    @filter.regex(r"^(撸猫|逗猫|摸猫|rua猫|陪猫娘|陪猫猫|贴贴猫娘|贴贴猫猫)$")
+    @neko_command("撸猫", alias={"逗猫", "摸猫", "rua猫", "陪猫娘", "陪猫猫", "贴贴猫娘", "贴贴猫猫"})
     async def interact_catgirl(self, event: AstrMessageEvent):
         uid = self._uid(event)
         action = (event.message_str or "").strip()
         ok, msg, img = self.catgirl.interact(uid, action)
         yield self._mixed_result(event, msg, img)
 
-    @filter.regex(r"^猫娘改名叫(.+)$")
-    async def rename_catgirl(self, event: AstrMessageEvent):
+    @neko_command("猫娘改名")
+    async def rename_catgirl(self, event: AstrMessageEvent, name: GreedyStr):
         uid = self._uid(event)
-        m = re.search(r"^猫娘改名叫(.+)$", event.message_str or "")
-        name = m.group(1).strip() if m else ""
         ok, msg = self.catgirl.rename(uid, name)
         yield event.plain_result(msg)
 
-    @filter.regex(r"^(更换猫娘形象|更换猫猫形象)(?:\s|$).*")
+    @neko_command("更换猫娘形象", alias={"更换猫猫形象"})
     async def change_catgirl_image(self, event: AstrMessageEvent):
 
         uid = self._uid(event)
@@ -370,7 +413,7 @@ class SapphireEconomyPlugin(Star):
         ok, msg, img = await self.catgirl.change_image(uid, image_src)
         yield self._mixed_result(event, msg, img)
 
-    @filter.regex(r"^.*$")
+    @filter.custom_filter(pending_image_filter(), False)
     async def pending_image_listener(self, event: AstrMessageEvent):
         uid = self._uid(event)
         if uid not in self._pending_image_changes:
@@ -391,7 +434,7 @@ class SapphireEconomyPlugin(Star):
         yield self._mixed_result(event, msg, img)
 
 
-    @filter.regex(r"^(猫娘排行榜|猫猫排行榜)$")
+    @neko_command("猫娘排行榜", alias={"猫猫排行榜"})
     async def catgirl_rank(self, event: AstrMessageEvent):
         gid = self._gid(event)
         img = self.catgirl.draw_rank(gid)
@@ -400,14 +443,14 @@ class SapphireEconomyPlugin(Star):
             return
         yield event.image_result(str(img))
 
-    @filter.regex(r"^(迁移猫娘到本群|猫娘迁移)$")
+    @neko_command("迁移猫娘到本群", alias={"猫娘迁移"})
     async def migrate_catgirl_to_group(self, event: AstrMessageEvent):
         uid = self._uid(event)
         gid = self._gid(event)
         ok, msg, img = self.catgirl.migrate_to_group(gid, uid)
         yield self._mixed_result(event, msg, img)
 
-    @filter.regex(r"^钱包排行榜$")
+    @neko_command("钱包排行榜")
     async def wallet_rank(self, event: AstrMessageEvent):
         rows = self.economy.wallet_rank(10)
         if not rows:
@@ -418,14 +461,10 @@ class SapphireEconomyPlugin(Star):
             lines.append(f"{i}. {row['uid']}: {row['balance']} {self.coin_name}")
         yield event.plain_result("\n".join(lines))
 
-    @filter.regex(r"^管理员给\s*(\d+)\s*(.+)$")
-    async def admin_give(self, event: AstrMessageEvent):
+    @neko_command("管理员给")
+    async def admin_give(self, event: AstrMessageEvent, amount: int):
         if not self._is_admin(event):
             return
-        m = re.search(r"^管理员给\s*(\d+)\s*(.+)$", event.message_str or "")
-        if not m:
-            return
-        amount = int(m.group(1))
         target = self._extract_at_uid(event)
         if not target:
             yield event.plain_result("要 @ 目标用户喔～")
@@ -433,14 +472,10 @@ class SapphireEconomyPlugin(Star):
         self.economy.add_balance(target, amount)
         yield event.plain_result(f"已给 {target} 添加 {amount} {self.coin_name}。")
 
-    @filter.regex(r"^管理员扣\s*(\d+)\s*(.+)$")
-    async def admin_deduct(self, event: AstrMessageEvent):
+    @neko_command("管理员扣")
+    async def admin_deduct(self, event: AstrMessageEvent, amount: int):
         if not self._is_admin(event):
             return
-        m = re.search(r"^管理员扣\s*(\d+)\s*(.+)$", event.message_str or "")
-        if not m:
-            return
-        amount = int(m.group(1))
         target = self._extract_at_uid(event)
         if not target:
             yield event.plain_result("要 @ 目标用户喔～")
@@ -448,7 +483,7 @@ class SapphireEconomyPlugin(Star):
         self.economy.add_balance(target, -amount)
         yield event.plain_result(f"已从 {target} 扣除 {amount} {self.coin_name}。")
 
-    @filter.regex(r"^管理员查看(.+)$")
+    @neko_command("管理员查看")
     async def admin_check(self, event: AstrMessageEvent):
         if not self._is_admin(event):
             return
