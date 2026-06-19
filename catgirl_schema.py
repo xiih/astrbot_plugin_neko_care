@@ -1,3 +1,4 @@
+import math
 import random
 import time
 from typing import Dict, Tuple
@@ -209,12 +210,50 @@ def companion_days(cat: Dict) -> int:
 
 
 def bond_score(cat: Dict) -> int:
-    stage = int(cat.get("stage", 0) or 0)
     intimacy = int(cat.get("intimacy", 0) or 0)
     growth = int(cat.get("growth", 0) or 0)
+    stage = int(cat.get("stage", 0) or 0)
     mood = clamp_int(cat.get("mood", 0))
     health = clamp_int(cat.get("health", 0))
-    return stage * 10000 + intimacy * 2 + growth + mood + health
+    days = companion_days(cat)
+
+    # 照顾活跃度：总喂食+互动+打工次数
+    stats = cat.get("care_stats", {}) or {}
+    total_acts = (
+        int(stats.get("total_feeds", 0))
+        + int(stats.get("total_interacts", 0))
+        + int(stats.get("total_works", 0))
+    )
+
+    # 体重健康度：偏离理想体重越少越好
+    weight = float(cat.get("weight", 60))
+    ideal = float(cat.get("ideal_weight", 60))
+    weight_deviation = abs(weight - ideal)
+    weight_health = max(0, int(50 - weight_deviation * 2))
+
+    # —— 1. 核心基础分 ——
+    # 亲密度（intimacy 更难涨，权重更高）和成长值都用开平方减缓后期膨胀
+    intimacy_term = int(math.isqrt(intimacy) * 100)
+    growth_term = int(math.isqrt(growth) * 25)
+    # 阶段作为系数放大基础分（stage 0→1.00, 3→1.24, 6→1.48）
+    base = int((intimacy_term + growth_term) * (1.0 + stage * 0.08))
+
+    # —— 2. 实时状态加成 ——
+    state_bonus = mood * 5 + health * 5
+
+    # —— 3. 陪伴加成（每天+3） ——
+    days_bonus = days * 3
+
+    # —— 4. 照顾活跃加成（开平方降噪，上限 2000） ——
+    acts_bonus = min(int(math.isqrt(total_acts) * 20), 2000)
+
+    # —— 5. 体重管理加成 ——
+    weight_bonus = weight_health
+
+    # —— 6. 身心协同加成（心情≥60 且 健康≥60 时，二者兼顾的额外奖励） ——
+    synergy = int((mood * health) / 30) if mood >= 60 and health >= 60 else 0
+
+    return max(0, base + state_bonus + days_bonus + acts_bonus + weight_bonus + synergy)
 
 
 def status_tag(cat: Dict) -> str:
