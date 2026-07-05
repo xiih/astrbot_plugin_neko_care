@@ -232,6 +232,15 @@ p {
   margin-bottom: 12px;
 }
 
+.compact-heading {
+  margin-bottom: 8px;
+}
+
+.compact-heading h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
 .rule-grid,
 .form-grid {
   display: grid;

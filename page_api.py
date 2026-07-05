@@ -27,7 +27,11 @@ USER_STORE_SECTIONS = (
     "pending_adoptions",
     "runaway_notices",
     "runaway_catgirls",
+    "daily_wishes",
+    "event_log",
+    "event_state",
 )
+LEGACY_USER_STORE_SECTIONS = ("quests",)
 
 
 class NekoCarePageApi:
@@ -164,7 +168,7 @@ class NekoCarePageApi:
                 return self._error("缺少用户 ID")
 
             def op(root):
-                for key in USER_STORE_SECTIONS:
+                for key in (*USER_STORE_SECTIONS, *LEGACY_USER_STORE_SECTIONS):
                     section = root.setdefault(key, {})
                     if isinstance(section, dict):
                         section.pop(uid, None)
@@ -189,6 +193,11 @@ class NekoCarePageApi:
         shop = config.get("shop", {}) if isinstance(config.get("shop"), dict) else {}
         shop_items = shop.get("items", [])
         care_services = shop.get("care_services", [])
+        daily_wishes = config.get("daily_wishes", {}) if isinstance(config.get("daily_wishes"), dict) else {}
+        daily_wish_templates = daily_wishes.get("templates", [])
+        events = config.get("events", {}) if isinstance(config.get("events"), dict) else {}
+        event_items = events.get("items", [])
+        personality_events = events.get("personality_events", [])
         balances = [self._int(value, 0, 0, 1_000_000_000) for value in wallet.values()]
         return {
             "wallet_users": len(wallet),
@@ -208,6 +217,12 @@ class NekoCarePageApi:
             "enabled_interactions": len([row for row in effects if isinstance(row, dict) and row.get("enabled", True)]) if isinstance(effects, list) else 0,
             "personalities": len(personalities) if isinstance(personalities, list) else 0,
             "enabled_personalities": len([row for row in personalities if isinstance(row, dict) and row.get("enabled", True)]) if isinstance(personalities, list) else 0,
+            "daily_wish_templates": len(daily_wish_templates) if isinstance(daily_wish_templates, list) else 0,
+            "enabled_daily_wish_templates": len([row for row in daily_wish_templates if isinstance(row, dict) and row.get("enabled", True)]) if isinstance(daily_wish_templates, list) else 0,
+            "event_items": len(event_items) if isinstance(event_items, list) else 0,
+            "enabled_event_items": len([row for row in event_items if isinstance(row, dict) and row.get("enabled", True)]) if isinstance(event_items, list) else 0,
+            "personality_events": len(personality_events) if isinstance(personality_events, list) else 0,
+            "enabled_personality_events": len([row for row in personality_events if isinstance(row, dict) and row.get("enabled", True)]) if isinstance(personality_events, list) else 0,
         }
 
     def _options(self) -> Dict[str, Any]:

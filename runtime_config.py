@@ -5,6 +5,17 @@ import time
 from pathlib import Path
 from typing import Any, Dict
 
+from .catgirl_schema import PERSONALITIES
+
+# 每日心愿任务类型白名单（心愿只绑定猫娘养成行为）
+DAILY_WISH_TYPES = ("feed", "interact", "cat_work", "buy_gift", "care")
+
+# 随机事件锚点白名单
+EVENT_ANCHORS = ("sign", "daily_work", "feed", "cat_work_finish", "interact")
+
+# 性格专属事件锚点白名单（仅限涉及猫娘性格的养成行为）
+PERSONALITY_EVENT_ANCHORS = ("interact", "feed", "cat_work_finish")
+
 
 def default_runtime_config() -> Dict[str, Any]:
     return {
@@ -37,6 +48,9 @@ def default_runtime_config() -> Dict[str, Any]:
             "probability": 0.8,
             "pity": 3,
             "appearance_change_price": 900,
+        },
+        "render": {
+            "output_image_scale": 0.85,
         },
         "care": {
             "feed_satiety_limit": 85,
@@ -340,6 +354,99 @@ def default_runtime_config() -> Dict[str, Any]:
                 {"command": "贴贴猫猫", "text": "你和她贴贴了一下，她尾巴轻轻晃了晃。", "mood_min": 4, "mood_max": 8, "intimacy_min": 5, "intimacy_max": 10, "growth_min": 3, "growth_max": 6, "energy_cost": 0, "min_stage": 2, "enabled": True},
             ],
         },
+        "daily_wishes": {
+            "enabled": True,
+            "refresh_at_hour": 4,
+            "templates": [
+                {"id": "wish_feed", "name": "想吃草莓奶油蛋糕", "type": "feed", "target_name": "草莓奶油蛋糕", "target": 1, "text": "她盯着甜点橱窗看了好久，今天想吃一份草莓奶油蛋糕。", "reward_min": 45, "reward_max": 75, "intimacy_min": 2, "intimacy_max": 5, "growth_min": 1, "growth_max": 3, "min_stage": 0, "enabled": True},
+                {"id": "wish_feed_fish_bento", "name": "想吃小鱼干便当", "type": "feed", "target_name": "小鱼干便当", "target": 1, "text": "她把便当菜单推到你面前，小声说想尝尝小鱼干便当。", "reward_min": 45, "reward_max": 80, "intimacy_min": 2, "intimacy_max": 5, "growth_min": 1, "growth_max": 3, "min_stage": 0, "enabled": True},
+                {"id": "wish_interact", "name": "想被你撸猫", "type": "interact", "target_name": "撸猫", "target": 1, "text": "她靠近你的手边蹭了蹭，今天想让你认真撸撸她。", "reward_min": 35, "reward_max": 65, "intimacy_min": 3, "intimacy_max": 6, "growth_min": 1, "growth_max": 3, "min_stage": 0, "enabled": True},
+                {"id": "wish_interact_rua", "name": "想被 rua 成一团", "type": "interact", "target_name": "rua猫", "target": 1, "text": "她把尾巴绕成小圈，像是在邀请你把她 rua 成软乎乎的一团。", "reward_min": 35, "reward_max": 70, "intimacy_min": 3, "intimacy_max": 7, "growth_min": 1, "growth_max": 3, "min_stage": 0, "enabled": True},
+                {"id": "wish_cat_work", "name": "想去猫咖服务员", "type": "cat_work", "target_name": "猫咖服务员", "target": 1, "text": "她整理好围裙，今天想去猫咖服务员的岗位帮你赚一点钱。", "reward_min": 55, "reward_max": 95, "intimacy_min": 2, "intimacy_max": 5, "growth_min": 3, "growth_max": 6, "min_stage": 0, "enabled": True},
+                {"id": "wish_cat_work_library", "name": "想去图书馆整理员", "type": "cat_work", "target_name": "图书馆整理员", "target": 1, "text": "她抱着小本子说，今天想去图书馆整理书架。", "reward_min": 55, "reward_max": 90, "intimacy_min": 2, "intimacy_max": 5, "growth_min": 3, "growth_max": 6, "min_stage": 0, "enabled": True},
+                {"id": "wish_buy_gift", "name": "想收到小鱼干礼盒", "type": "buy_gift", "target_name": "小鱼干礼盒", "target": 1, "text": "她假装路过礼物架，其实眼神一直停在小鱼干礼盒上。", "reward_min": 30, "reward_max": 60, "intimacy_min": 4, "intimacy_max": 8, "growth_min": 1, "growth_max": 2, "min_stage": 0, "enabled": True},
+                {"id": "wish_buy_ribbon", "name": "想收到丝带发夹", "type": "buy_gift", "target_name": "丝带发夹", "target": 1, "text": "她摸了摸头发，今天似乎很想要一枚新的丝带发夹。", "reward_min": 35, "reward_max": 70, "intimacy_min": 4, "intimacy_max": 8, "growth_min": 1, "growth_max": 3, "min_stage": 0, "enabled": True},
+                {"id": "wish_care", "name": "想做按摩护理", "type": "care", "target_name": "按摩护理", "target": 1, "text": "她捏了捏肩膀，今天想做一次按摩护理放松一下。", "reward_min": 40, "reward_max": 80, "intimacy_min": 3, "intimacy_max": 7, "growth_min": 1, "growth_max": 3, "min_stage": 0, "enabled": True},
+                {"id": "wish_care_onsen", "name": "想去温泉放松", "type": "care", "target_name": "温泉放松", "target": 1, "text": "她翻着温泉介绍页，尾巴轻轻晃着，想去温泉好好放松。", "reward_min": 60, "reward_max": 110, "intimacy_min": 4, "intimacy_max": 9, "growth_min": 2, "growth_max": 4, "min_stage": 0, "enabled": True},
+            ],
+        },
+        "events": {
+            "daily_limit_per_anchor": 5,
+            "daily_limit_per_personality": 2,
+            "items": [
+                {"id": "find_coin", "anchor": "sign", "prob": 0.15, "text": "你签到打卡时，在抽屉缝隙里发现了几枚被遗忘的零钱。", "coin_min": 10, "coin_max": 30, "mood": 0, "energy": 0, "intimacy": 0, "growth": 0, "min_stage": 0, "enabled": True},
+                {"id": "lucky_day", "anchor": "sign", "prob": 0.08, "text": "今天运气不错，老板多给你塞了一份见面礼。", "coin_min": 25, "coin_max": 50, "mood": 0, "energy": 0, "intimacy": 0, "growth": 0, "min_stage": 0, "enabled": True},
+                {"id": "rainy_coupon", "anchor": "sign", "prob": 0.07, "text": "雨天签到时抽到一张猫咖优惠券，兑换成了一点零花钱。", "coin_min": 12, "coin_max": 38, "mood": 0, "energy": 0, "intimacy": 0, "growth": 0, "min_stage": 0, "enabled": True},
+                {"id": "old_envelope", "anchor": "sign", "prob": 0.05, "text": "你整理签到本时翻出一个旧信封，里面还夹着几枚宝石。", "coin_min": 18, "coin_max": 45, "mood": 0, "energy": 0, "intimacy": 0, "growth": 0, "min_stage": 0, "enabled": True},
+                {"id": "overtime", "anchor": "daily_work", "prob": 0.12, "text": "今天临时加了班，结账时老板偷偷塞了个红包给你。", "coin_min": 20, "coin_max": 50, "mood": 0, "energy": 0, "intimacy": 0, "growth": 0, "min_stage": 0, "enabled": True},
+                {"id": "kind_customer", "anchor": "daily_work", "prob": 0.08, "text": "一位常客看在你勤快的份上多给了小费。", "coin_min": 15, "coin_max": 35, "mood": 0, "energy": 0, "intimacy": 0, "growth": 0, "min_stage": 0, "enabled": True},
+                {"id": "early_finish", "anchor": "daily_work", "prob": 0.08, "text": "今天排班意外顺利，你提前收工还拿到了完整报酬。", "coin_min": 18, "coin_max": 42, "mood": 0, "energy": 0, "intimacy": 0, "growth": 0, "min_stage": 0, "enabled": True},
+                {"id": "helpful_shift", "anchor": "daily_work", "prob": 0.06, "text": "同事临时请你帮忙顶了一小段班，事后认真补给了你谢礼。", "coin_min": 22, "coin_max": 55, "mood": 0, "energy": 0, "intimacy": 0, "growth": 0, "min_stage": 0, "enabled": True},
+                {"id": "warm_food", "anchor": "feed", "prob": 0.10, "text": "食物端上来时还冒着热气，她满足地晃了晃尾巴。", "coin_min": 0, "coin_max": 0, "mood": 4, "energy": 0, "intimacy": 1, "growth": 1, "min_stage": 0, "enabled": True},
+                {"id": "clean_plate", "anchor": "feed", "prob": 0.08, "text": "她把盘子吃得干干净净，还认真向你比了一个小小的赞。", "coin_min": 0, "coin_max": 0, "mood": 3, "energy": 2, "intimacy": 1, "growth": 1, "min_stage": 0, "enabled": True},
+                {"id": "shared_bite", "anchor": "feed", "prob": 0.06, "text": "她把最喜欢的一口留给你，假装只是吃不下了。", "coin_min": 0, "coin_max": 0, "mood": 2, "energy": 0, "intimacy": 3, "growth": 0, "min_stage": 1, "enabled": True},
+                {"id": "bring_gift", "anchor": "cat_work_finish", "prob": 0.15, "text": "猫娘打工时偷偷藏了份小礼物带回来，眼睛亮晶晶的。", "coin_min": 0, "coin_max": 0, "mood": 3, "energy": 0, "intimacy": 3, "growth": 2, "min_stage": 0, "enabled": True},
+                {"id": "encounter_friend", "anchor": "cat_work_finish", "prob": 0.10, "text": "打工路上偶遇了她的老朋友，带回了一份顺手买的纪念品。", "coin_min": 0, "coin_max": 0, "mood": 5, "energy": 0, "intimacy": 2, "growth": 1, "min_stage": 0, "enabled": True},
+                {"id": "skill_practice", "anchor": "cat_work_finish", "prob": 0.09, "text": "她在空档学会了更快打包托盘，回来时认真展示给你看。", "coin_min": 0, "coin_max": 0, "mood": 2, "energy": 0, "intimacy": 1, "growth": 3, "min_stage": 0, "enabled": True},
+                {"id": "lost_found", "anchor": "cat_work_finish", "prob": 0.06, "text": "她帮客人找回了遗失的小物件，对方坚持留下了一点谢礼。", "coin_min": 10, "coin_max": 35, "mood": 2, "energy": 0, "intimacy": 2, "growth": 1, "min_stage": 0, "enabled": True},
+                {"id": "rainy_return", "anchor": "cat_work_finish", "prob": 0.05, "text": "回程下起小雨，她护着小钱包一路跑回来，虽然狼狈却很得意。", "coin_min": 0, "coin_max": 0, "mood": -1, "energy": -3, "intimacy": 3, "growth": 1, "min_stage": 0, "enabled": True},
+                {"id": "extra_energy", "anchor": "interact", "prob": 0.10, "text": "玩着玩着她也更来劲了，仿佛重新充了电。", "coin_min": 0, "coin_max": 0, "mood": 0, "energy": 8, "intimacy": 0, "growth": 0, "min_stage": 0, "enabled": True},
+                {"id": "play_mood", "anchor": "interact", "prob": 0.18, "text": "她今天格外黏人，扑在你身上撒娇了好一会儿。", "coin_min": 0, "coin_max": 0, "mood": 5, "energy": 0, "intimacy": 2, "growth": 1, "min_stage": 0, "enabled": True},
+                {"id": "nap_invitation", "anchor": "interact", "prob": 0.06, "text": "她拉着你的衣角，软软地哼着想一起午睡。", "coin_min": 0, "coin_max": 0, "mood": 4, "energy": 0, "intimacy": 4, "growth": 0, "min_stage": 1, "enabled": True},
+                {"id": "new_game", "anchor": "interact", "prob": 0.08, "text": "她突然想出一个新游戏，规则讲得乱七八糟但玩得很开心。", "coin_min": 0, "coin_max": 0, "mood": 4, "energy": -1, "intimacy": 2, "growth": 2, "min_stage": 0, "enabled": True},
+                {"id": "photo_moment", "anchor": "interact", "prob": 0.06, "text": "互动时抓拍到一张很可爱的照片，她看完后偷偷保存了下来。", "coin_min": 0, "coin_max": 0, "mood": 3, "energy": 0, "intimacy": 3, "growth": 1, "min_stage": 0, "enabled": True},
+                {"id": "tidy_corner", "anchor": "interact", "prob": 0.05, "text": "她玩到一半忽然开始收拾角落，说这样下次就能玩得更舒服。", "coin_min": 0, "coin_max": 0, "mood": 1, "energy": -1, "intimacy": 1, "growth": 3, "min_stage": 1, "enabled": True},
+            ],
+            "work_finish": {
+                "normal_prob": 0.80,
+                "surprise_prob": 0.15,
+                "accident_prob": 0.05,
+                "surprise": {
+                    "coin_multiplier": 2.0,
+                    "text": "她带着一脸兴奋跑回来，今天竟然撞上了惊喜奇遇，把报酬翻倍带回家啦！",
+                    "texts": [
+                        "她带着一脸兴奋跑回来，今天竟然撞上了惊喜奇遇，把报酬翻倍带回家啦！",
+                        "她今天帮客人解决了小麻烦，对方坚持多给了一笔谢礼。",
+                        "店长夸她反应快，把临时奖金塞进了她的小包里。",
+                        "她被邀请参加收尾盘点，意外分到一份额外报酬。",
+                        "路过的熟客认出了她，笑着把小费放在账单夹里。",
+                    ],
+                    "mood": 3,
+                    "intimacy": 2,
+                    "growth": 3,
+                },
+                "accident": {
+                    "coin_multiplier": 2.0,
+                    "mood": -10,
+                    "text": "猫娘在打工路上不小心摔了一跤，老板给了补偿金，但她心情有点糟糕。",
+                    "texts": [
+                        "猫娘在打工路上不小心摔了一跤，老板给了补偿金，但她心情有点糟糕。",
+                        "她把饮料洒在围裙上，虽然拿到了补偿金，还是郁闷地低着耳朵。",
+                        "回程时突然下雨，她护住了报酬，却被淋得有点没精神。",
+                        "收摊时差点弄丢工牌，店长给了压惊费，她却一路都在懊恼。",
+                        "忙乱中她被纸箱绊了一下，幸好没受伤，只是心情明显低落。",
+                    ],
+                },
+            },
+            "personality_events": [
+                {"id": "shy_hide", "personality": "害羞", "anchor": "interact", "prob": 0.08, "text": "她害羞地把脸埋进你怀里小声哼哼，耳朵尖都红了。", "mood": 3, "energy": 0, "intimacy": 3, "growth": 1, "min_stage": 0, "enabled": True},
+                {"id": "shy_diary", "personality": "害羞", "anchor": "feed", "prob": 0.06, "text": "她偷偷把今天发生的事写进了小本子，悄悄瞥了你一眼。", "mood": 2, "energy": 0, "intimacy": 2, "growth": 1, "min_stage": 0, "enabled": True},
+                {"id": "lively_zoom", "personality": "活泼", "anchor": "interact", "prob": 0.09, "text": "她突然满屋子飞奔，把你的手都拉得东倒西歪。", "mood": 5, "energy": -2, "intimacy": 2, "growth": 1, "min_stage": 0, "enabled": True},
+                {"id": "lively_snack", "personality": "活泼", "anchor": "feed", "prob": 0.07, "text": "她吃得太开心，把你那份也惦记上了，歪着头讨要。", "mood": 4, "energy": 0, "intimacy": 1, "growth": 1, "min_stage": 0, "enabled": True},
+                {"id": "tsundere_refuse", "personality": "傲娇", "anchor": "interact", "prob": 0.08, "text": "她嘴里嘟囔着「才不稀罕」，尾巴却诚实地缠住了你的手腕。", "mood": 2, "energy": 0, "intimacy": 3, "growth": 1, "min_stage": 0, "enabled": True},
+                {"id": "tsundere_share", "personality": "傲娇", "anchor": "feed", "prob": 0.06, "text": "她假装漫不经心地把自己盘里最好的一块推到你面前。", "mood": 3, "energy": 0, "intimacy": 2, "growth": 1, "min_stage": 0, "enabled": True},
+                {"id": "gentle_massage", "personality": "温柔", "anchor": "interact", "prob": 0.09, "text": "她轻轻揉了揉你酸痛的肩，安静地陪伴在你身边。", "mood": 2, "energy": 0, "intimacy": 4, "growth": 1, "min_stage": 0, "enabled": True},
+                {"id": "gentle_tea", "personality": "温柔", "anchor": "feed", "prob": 0.07, "text": "她默默泡了一杯温热的茶递过来，眼神软软的。", "mood": 3, "energy": 0, "intimacy": 2, "growth": 1, "min_stage": 0, "enabled": True},
+                {"id": "gluttony_steal", "personality": "贪吃", "anchor": "feed", "prob": 0.10, "text": "她偷偷多抓了一块，被抓包时还在嚼，腮帮鼓鼓的。", "mood": 4, "energy": 0, "intimacy": 1, "growth": 1, "min_stage": 0, "enabled": True},
+                {"id": "gluttony_bite", "personality": "贪吃", "anchor": "interact", "prob": 0.07, "text": "她玩着玩着突然轻轻咬了你的指尖一口，假装是「尝尝味道」。", "mood": 3, "energy": 0, "intimacy": 2, "growth": 1, "min_stage": 0, "enabled": True},
+                {"id": "lazy_yawn", "personality": "慵懒", "anchor": "interact", "prob": 0.08, "text": "她懒洋洋地伸了个大懒腰，顺势在你身边团成了一团。", "mood": 3, "energy": 2, "intimacy": 3, "growth": 1, "min_stage": 0, "enabled": True},
+                {"id": "lazy_refuse", "personality": "慵懒", "anchor": "feed", "prob": 0.05, "text": "她半睁着眼接过食物，慢吞吞地吃了起来，吃得格外满足。", "mood": 4, "energy": 0, "intimacy": 1, "growth": 1, "min_stage": 0, "enabled": True},
+                {"id": "serious_report", "personality": "认真", "anchor": "cat_work_finish", "prob": 0.09, "text": "她一本正经地递上一份打工小结，连零头都算得清清楚楚。", "mood": 2, "energy": 0, "intimacy": 3, "growth": 2, "min_stage": 0, "enabled": True},
+                {"id": "serious_neaten", "personality": "认真", "anchor": "interact", "prob": 0.06, "text": "她默默替你整理好凌乱的桌面，才肯过来陪你玩。", "mood": 2, "energy": 0, "intimacy": 2, "growth": 1, "min_stage": 0, "enabled": True},
+                {"id": "clingy_hug", "personality": "黏人", "anchor": "interact", "prob": 0.10, "text": "她从背后抱住你，死活不肯撒手，软软地赖在你身上。", "mood": 4, "energy": 0, "intimacy": 5, "growth": 1, "min_stage": 0, "enabled": True},
+                {"id": "clingy_wait", "personality": "黏人", "anchor": "feed", "prob": 0.07, "text": "她黏着你寸步不离，连吃饭都要拽着你的袖子。", "mood": 3, "energy": 0, "intimacy": 3, "growth": 1, "min_stage": 0, "enabled": True},
+            ],
+        },
     }
 
 
@@ -408,6 +515,11 @@ class NekoRuntimeConfig:
             "pity": self._int(wish.get("pity"), 3, 1, 365),
             "appearance_change_price": self._int(wish.get("appearance_change_price"), 900, 0, 1_000_000),
         })
+
+        render = src.get("render") if isinstance(src.get("render"), dict) else {}
+        base["render"] = {
+            "output_image_scale": self._float(render.get("output_image_scale"), 0.85, 0.4, 1.0),
+        }
 
         care = src.get("care") if isinstance(src.get("care"), dict) else {}
         for key, default, low, high in [
@@ -523,6 +635,17 @@ class NekoRuntimeConfig:
 
         interactions = src.get("interactions") if isinstance(src.get("interactions"), dict) else {}
         base["interactions"]["effects"] = self._interactions(interactions.get("effects"), base["interactions"]["effects"])
+
+        legacy_quests = src.get("quests") if isinstance(src.get("quests"), dict) else {}
+        daily_wishes = src.get("daily_wishes") if isinstance(src.get("daily_wishes"), dict) else {}
+        base["daily_wishes"] = {
+            "enabled": bool(daily_wishes.get("enabled", True)),
+            "refresh_at_hour": self._int(daily_wishes.get("refresh_at_hour", legacy_quests.get("refresh_at_hour", 4)), 4, 0, 23),
+            "templates": self._daily_wish_templates(daily_wishes.get("templates"), base["daily_wishes"]["templates"]),
+        }
+
+        events = src.get("events") if isinstance(src.get("events"), dict) else {}
+        base["events"] = self._events_section(events, base["events"])
         return base
 
     def _with_legacy_config(self, config: Dict[str, Any], legacy_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -695,6 +818,146 @@ class NekoRuntimeConfig:
                 self._ensure_order(item, a, b)
             result.append(item)
         return result or copy.deepcopy(defaults)
+
+    def _daily_wish_templates(self, rows, defaults):
+        result = []
+        seen = set()
+        default_by_id = {str(row.get("id", "")): row for row in defaults if isinstance(row, dict)}
+        source_rows = rows if isinstance(rows, list) else defaults
+        if isinstance(rows, list):
+            existing_ids = {str(row.get("id", "")) for row in rows if isinstance(row, dict)}
+            source_rows = list(rows) + [
+                copy.deepcopy(row)
+                for row in defaults
+                if isinstance(row, dict) and str(row.get("id", "")) not in existing_ids
+            ]
+        for row in source_rows:
+            if not isinstance(row, dict):
+                continue
+            name = self._text(row.get("name"), "心愿", 40)
+            wtype = str(row.get("type") or "").strip()
+            if wtype not in DAILY_WISH_TYPES:
+                wtype = "feed"
+            wid = self._id(row.get("id"), name, seen)
+            default_row = default_by_id.get(str(row.get("id", "")), {})
+            target_name = row.get("target_name")
+            if not str(target_name or "").strip() and isinstance(default_row, dict):
+                target_name = default_row.get("target_name")
+            item = {
+                "id": wid,
+                "name": name,
+                "type": wtype,
+                "target_name": self._text(target_name, "", 40),
+                "target": self._int(row.get("target"), 1, 1, 1000),
+                "text": self._text(row.get("text"), "她今天有一个小心愿。", 140),
+                "reward_min": self._int(row.get("reward_min"), 10, 0, 1_000_000),
+                "reward_max": self._int(row.get("reward_max"), 20, 0, 1_000_000),
+                "intimacy_min": self._int(row.get("intimacy_min"), 0, 0, 100_000),
+                "intimacy_max": self._int(row.get("intimacy_max"), 0, 0, 100_000),
+                "growth_min": self._int(row.get("growth_min"), 0, 0, 100_000),
+                "growth_max": self._int(row.get("growth_max"), 0, 0, 100_000),
+                "min_stage": self._int(row.get("min_stage"), 0, 0, 6),
+                "enabled": bool(row.get("enabled", True)),
+            }
+            for a, b in [("reward_min", "reward_max"), ("intimacy_min", "intimacy_max"), ("growth_min", "growth_max")]:
+                self._ensure_order(item, a, b)
+            result.append(item)
+        return result or copy.deepcopy(defaults)
+
+    def _event_items(self, rows, defaults, with_personality):
+        """通用事件项校验。with_personality=True 时附加校验 personality 字段。"""
+        result = []
+        seen = set()
+        anchors = PERSONALITY_EVENT_ANCHORS if with_personality else EVENT_ANCHORS
+        source_rows = rows if isinstance(rows, list) else defaults
+        if isinstance(rows, list):
+            existing_ids = {str(row.get("id", "")) for row in rows if isinstance(row, dict)}
+            source_rows = list(rows) + [
+                copy.deepcopy(row)
+                for row in defaults
+                if isinstance(row, dict) and str(row.get("id", "")) not in existing_ids
+            ]
+        for row in source_rows:
+            if not isinstance(row, dict):
+                continue
+            text = self._text(row.get("text"), "今日奇遇发生了。", 160)
+            eid = self._id(row.get("id"), text[:8] or "event", seen)
+            anchor = str(row.get("anchor") or "").strip()
+            if anchor not in anchors:
+                anchor = anchors[0]
+            item = {
+                "id": eid,
+                "anchor": anchor,
+                "prob": self._float(row.get("prob"), 0.10, 0, 1),
+                "text": text,
+                "coin_min": self._int(row.get("coin_min"), 0, -1_000_000, 1_000_000),
+                "coin_max": self._int(row.get("coin_max"), 0, -1_000_000, 1_000_000),
+                "mood": self._int(row.get("mood"), 0, -100, 100),
+                "energy": self._int(row.get("energy"), 0, -100, 100),
+                "intimacy": self._int(row.get("intimacy"), 0, -100, 100),
+                "growth": self._int(row.get("growth"), 0, -100, 100),
+                "min_stage": self._int(row.get("min_stage"), 0, 0, 6),
+                "enabled": bool(row.get("enabled", True)),
+            }
+            if with_personality:
+                personality = self._text(row.get("personality"), "", 20)
+                if personality not in PERSONALITIES and personality:
+                    # 落到第一个性格，避免无效性格导致事件永不触发
+                    personality = PERSONALITIES[0]
+                elif not personality:
+                    personality = PERSONALITIES[0]
+                item["personality"] = personality
+            self._ensure_order(item, "coin_min", "coin_max")
+            result.append(item)
+        return result or copy.deepcopy(defaults)
+
+    def _events_section(self, src, defaults):
+        result = {
+            "daily_limit_per_anchor": self._int(src.get("daily_limit_per_anchor"), 5, 0, 1000),
+            "daily_limit_per_personality": self._int(src.get("daily_limit_per_personality"), 2, 0, 1000),
+            "items": self._event_items(src.get("items"), defaults["items"], with_personality=False),
+            "personality_events": self._event_items(src.get("personality_events"), defaults["personality_events"], with_personality=True),
+        }
+        # work_finish 子结构：三概率非负，零则归一化兜底
+        wf_src = src.get("work_finish") if isinstance(src.get("work_finish"), dict) else {}
+        wf_def = defaults["work_finish"]
+        normal_p = self._float(wf_src.get("normal_prob"), wf_def["normal_prob"], 0, 1)
+        surprise_p = self._float(wf_src.get("surprise_prob"), wf_def["surprise_prob"], 0, 1)
+        accident_p = self._float(wf_src.get("accident_prob"), wf_def["accident_prob"], 0, 1)
+        total = max(1e-9, normal_p + surprise_p + accident_p)
+        if abs(total - 1.0) > 0.05:
+            normal_p, surprise_p, accident_p = normal_p / total, surprise_p / total, accident_p / total
+
+        def _parse_sub(key, default_sub):
+            sub_src = wf_src.get(key) if isinstance(wf_src.get(key), dict) else {}
+            sub_def = wf_def[key]
+            default_text = self._text(sub_def.get("text"), "", 160)
+            default_texts = sub_def.get("texts") if isinstance(sub_def.get("texts"), list) else [default_text]
+            source_texts = sub_src.get("texts")
+            if not isinstance(source_texts, list):
+                old_text = self._text(sub_src.get("text"), "", 160)
+                if old_text:
+                    source_texts = [old_text] + [text for text in default_texts if text != old_text]
+                else:
+                    source_texts = default_texts
+            texts = self._text_list(source_texts, default_texts, 160, 30)
+            return {
+                "coin_multiplier": self._float(sub_src.get("coin_multiplier"), sub_def["coin_multiplier"], 0, 100),
+                "text": texts[0] if texts else default_text,
+                "texts": texts,
+                "mood": self._int(sub_src.get("mood"), sub_def.get("mood", 0), -100, 100),
+                "intimacy": self._int(sub_src.get("intimacy"), sub_def.get("intimacy", 0), -100, 100),
+                "growth": self._int(sub_src.get("growth"), sub_def.get("growth", 0), -100, 100),
+            }
+
+        result["work_finish"] = {
+            "normal_prob": normal_p,
+            "surprise_prob": surprise_p,
+            "accident_prob": accident_p,
+            "surprise": _parse_sub("surprise", wf_def["surprise"]),
+            "accident": _parse_sub("accident", wf_def["accident"]),
+        }
+        return result
 
     def _personalities(self, rows, defaults):
         defaults_by_name = {row.get("name"): row for row in defaults if isinstance(row, dict)}

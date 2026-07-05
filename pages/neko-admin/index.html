@@ -30,6 +30,8 @@
         <button class="tab" data-tab="shop" type="button">商店护理</button>
         <button class="tab" data-tab="interactions" type="button">互动</button>
         <button class="tab" data-tab="personalities" type="button">性格效果</button>
+        <button class="tab" data-tab="daily-wishes" type="button">每日心愿</button>
+        <button class="tab" data-tab="events" type="button">事件池</button>
       </nav>
 
       <main>
@@ -154,6 +156,7 @@
             <label>许愿成功概率<input data-path="wish.probability" type="number" min="0" max="1" step="0.01" /></label>
             <label>许愿保底次数<input data-path="wish.pity" type="number" min="1" step="1" /></label>
             <label>形象更换价格<input data-path="wish.appearance_change_price" type="number" min="0" step="1" /></label>
+            <label>生成图片比例<input data-path="render.output_image_scale" type="number" min="0.4" max="1" step="0.01" /></label>
           </div>
           <div class="section-block">
             <div class="section-heading">
@@ -279,6 +282,78 @@
             <h2>性格效果</h2>
           </div>
           <div id="personalitiesTable" class="table-wrap"></div>
+        </section>
+
+        <section id="daily-wishes" class="tab-panel">
+          <div class="form-grid compact-grid">
+            <label>跨日刷新小时（0-23）<input data-path="daily_wishes.refresh_at_hour" type="number" min="0" max="23" step="1" /></label>
+          </div>
+          <div class="section-heading">
+            <h2>每日心愿</h2>
+            <label class="inline-check"><input data-path="daily_wishes.enabled" type="checkbox" /> 启用每日心愿</label>
+            <button id="addDailyWish" class="ghost-button small" type="button">添加心愿</button>
+          </div>
+          <div id="dailyWishesTable" class="table-wrap"></div>
+          <p class="muted-line">心愿类型对应猫娘养成行为：feed=喂猫、interact=互动、cat_work=猫娘打工完成、buy_gift=购买礼物、care=护理服务。具体目标为空时只按类型匹配；填写后会匹配食物、动作、打工地点、礼物或护理服务名。</p>
+        </section>
+
+        <section id="events" class="tab-panel">
+          <div class="form-grid compact-grid">
+            <label>每锚点每日事件上限<input data-path="events.daily_limit_per_anchor" type="number" min="0" step="1" /></label>
+            <label>每性格每日事件上限<input data-path="events.daily_limit_per_personality" type="number" min="0" step="1" /></label>
+          </div>
+
+          <div class="section-block">
+            <div class="section-heading">
+              <h2>通用随机事件</h2>
+              <button id="addEvent" class="ghost-button small" type="button">添加事件</button>
+            </div>
+            <div id="eventsTable" class="table-wrap"></div>
+            <p class="muted-line">锚点：sign=签到、daily_work=主人每日打工、feed=喂食、cat_work_finish=猫娘打工完成、interact=互动。</p>
+          </div>
+
+          <div class="section-block">
+            <div class="section-heading">
+              <h2>打工风险结算</h2>
+            </div>
+            <div class="form-grid compact-grid">
+              <label>正常概率<input data-path="events.work_finish.normal_prob" type="number" min="0" max="1" step="0.01" /></label>
+              <label>奇遇概率<input data-path="events.work_finish.surprise_prob" type="number" min="0" max="1" step="0.01" /></label>
+              <label>意外概率<input data-path="events.work_finish.accident_prob" type="number" min="0" max="1" step="0.01" /></label>
+              <label>奇遇宝石倍率<input data-path="events.work_finish.surprise.coin_multiplier" type="number" min="0" step="0.1" /></label>
+              <label>奇遇心情<input data-path="events.work_finish.surprise.mood" type="number" step="1" /></label>
+              <label>奇遇亲密<input data-path="events.work_finish.surprise.intimacy" type="number" step="1" /></label>
+              <label>奇遇成长<input data-path="events.work_finish.surprise.growth" type="number" step="1" /></label>
+              <label>意外宝石倍率<input data-path="events.work_finish.accident.coin_multiplier" type="number" min="0" step="0.1" /></label>
+              <label>意外心情<input data-path="events.work_finish.accident.mood" type="number" step="1" /></label>
+            </div>
+            <div class="form-grid">
+              <div>
+                <div class="section-heading compact-heading">
+                  <h3>奇遇文本池</h3>
+                  <button id="addWorkSurpriseText" class="ghost-button small" type="button">添加文本</button>
+                </div>
+                <div id="workSurpriseTexts" class="text-list"></div>
+              </div>
+              <div>
+                <div class="section-heading compact-heading">
+                  <h3>意外文本池</h3>
+                  <button id="addWorkAccidentText" class="ghost-button small" type="button">添加文本</button>
+                </div>
+                <div id="workAccidentTexts" class="text-list"></div>
+              </div>
+            </div>
+            <p class="muted-line">三概率之和若偏离 1，保存时会自动归一化。奇遇：双倍宝石 + 加成；意外：双倍宝石补偿但心情下降。</p>
+          </div>
+
+          <div class="section-block">
+            <div class="section-heading">
+              <h2>性格专属事件</h2>
+              <button id="addPersonalityEvent" class="ghost-button small" type="button">添加事件</button>
+            </div>
+            <div id="personalityEventsTable" class="table-wrap"></div>
+            <p class="muted-line">锚点限 interact / feed / cat_work_finish。事件按猫娘当前性格过滤后独立概率触发。</p>
+          </div>
         </section>
       </main>
     </div>
