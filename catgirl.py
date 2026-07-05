@@ -2786,7 +2786,7 @@ class CatgirlService:
             now = now_ts()
             ok, cat, err_msg = self._load_active_cat(root, uid)
             if not ok:
-                return False, err_msg, cat, None, 0, 0, 0, 0, 0, 1, 1, "", "", 1
+                return False, err_msg, cat, None, 0, 0, 0, 0, 0, 1, 1, "", "", 1, ""
 
             cats = root.setdefault("catgirls", {})
             interact_data = cat.setdefault("interactions", {})
@@ -2796,19 +2796,19 @@ class CatgirlService:
             if cooldown > 0 and last_interact_at and now - last_interact_at < cooldown:
                 cats[uid] = cat
                 remain = self._format_duration(cooldown - (now - last_interact_at))
-                return False, f"「{cat['name']}」刚刚才互动过，先让她缓一缓吧。\n冷却剩余：{remain}", cat, None, 0, 0, 0, today_count, 0, 1, 1, "", "冷却中", 1
+                return False, f"「{cat['name']}」刚刚才互动过，先让她缓一缓吧。\n冷却剩余：{remain}", cat, None, 0, 0, 0, today_count, 0, 1, 1, "", "冷却中", 1, ""
 
             if float(cat.get("health", 0)) < care_rules["interact_min_health"]:
                 cats[uid] = cat
-                return False, f"「{cat['name']}」现在很虚弱，先喂点东西、让她好好休息一下吧。", cat, None, 0, 0, 0, today_count, 0, 1, 1, "", "", 1
+                return False, f"「{cat['name']}」现在很虚弱，先喂点东西、让她好好休息一下吧。", cat, None, 0, 0, 0, today_count, 0, 1, 1, "", "", 1, ""
             if int(cat.get("stage", 0)) < min_stage:
                 cats[uid] = cat
-                return False, f"「{cat['name']}」还有些害羞，等你们更亲近一点再做这个互动吧。", cat, None, 0, 0, 0, today_count, 0, 1, 1, "", "", 1
+                return False, f"「{cat['name']}」还有些害羞，等你们更亲近一点再做这个互动吧。", cat, None, 0, 0, 0, today_count, 0, 1, 1, "", "", 1, ""
             effective_base_energy_cost = max(int(base_energy_cost), int(care_rules["interaction_energy_cost"]))
             energy_cost = self._scaled_int(effective_base_energy_cost, self._personality_multiplier(cat, "interaction_energy_cost_multiplier"))
             if energy_cost and float(cat.get("energy", 0)) < energy_cost:
                 cats[uid] = cat
-                return False, f"「{cat['name']}」现在精力只有 {self._fmt_int(cat.get('energy', 0))}，这次互动需要 {energy_cost}。先让她休息一下再玩吧～", cat, None, 0, 0, 0, today_count, energy_cost, 1, 1, "", "", 1
+                return False, f"「{cat['name']}」现在精力只有 {self._fmt_int(cat.get('energy', 0))}，这次互动需要 {energy_cost}。先让她休息一下再玩吧～", cat, None, 0, 0, 0, today_count, energy_cost, 1, 1, "", "", 1, ""
 
             mood_add = self._scaled_int(base_mood_add, self._personality_multiplier(cat, "interaction_mood_multiplier"))
             mood_multiplier, mood_label = self._mood_interaction_multiplier(cat)
