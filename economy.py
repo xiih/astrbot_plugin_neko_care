@@ -17,12 +17,14 @@ class EconomyService:
         work_min: int = 35,
         work_max: int = 85,
         runtime_config_provider: Callable[[], Dict] | None = None,
+        events=None,
     ):
         self.store = store
         self.coin_name = coin_name
         self.work_min = work_min
         self.work_max = work_max
         self.runtime_config_provider = runtime_config_provider
+        self.events = events
 
     def _runtime(self) -> Dict:
         if callable(self.runtime_config_provider):
@@ -76,17 +78,27 @@ class EconomyService:
         work_min = max(0, int(rules.get("daily_work_min_reward", self.work_min)))
         work_max = max(work_min, int(rules.get("daily_work_max_reward", self.work_max)))
         reward = random.randint(work_min, work_max)
-        events = rules.get("daily_work_events")
-        if not isinstance(events, list) or not events:
-            events = [
+        events_text_pool = rules.get("daily_work_events")
+        if not isinstance(events_text_pool, list) or not events_text_pool:
+            events_text_pool = [
                 "你在猫咖帮忙端了一天甜点。",
                 "你帮老板整理仓库，累得耳朵都耷拉下来了。",
                 "你接了一个临时外包，顺利完成。",
                 "你在便利店值班，遇到了一群买关东煮的猫娘。",
                 "你帮别人修好了坏掉的自动贩卖机。",
             ]
-        event_text = random.choice([str(x) for x in events if str(x).strip()] or ["你认真完成了今天的打工。"])
+        event_text_pool = random.choice([str(x) for x in events_text_pool if str(x).strip()] or ["你认真完成了今天的打工。"])
         coin_name = self._coin_name()
+
+        # 预先抽取今日奇遇
+        event_roll = None
+        if self.events is not None:
+            today_anchor_count = self.events.today_anchor_count(self.store, uid, today, "daily_work")
+            triggered_ids = self.events.today_triggered_ids(self.store, uid, today)
+            try:
+                event_roll = self.events.roll("daily_work", None, today_anchor_count, triggered_ids)
+            except Exception:
+                event_roll = None
 
         def op(root):
             wallet = root.setdefault("wallet", {})
@@ -96,7 +108,20 @@ class EconomyService:
                 return False, "今天已经打过工啦，休息一下吧喵～"
             wallet[uid] = int(wallet.get(uid, 0)) + reward
             user["last_work_date"] = today
-            return True, f"{event_text}\n获得 {reward} {coin_name}！\n当前余额：{wallet[uid]} {coin_name}"
+
+            # 今日奇遇：主人打工仅发放额外宝石 + 文本，不涉及猫娘 mood/intimacy
+            bonus_text = ""
+            bonus_coin = 0
+            if event_roll is not None:
+                ev, deltas = event_roll
+                bonus_coin = int(deltas.get("coin", 0) or 0)
+                if bonus_coin:
+                    wallet[uid] = int(wallet.get(uid, 0)) + bonus_coin
+                bonus_text = str(ev.get("text", "") or "")
+                self.events.record_event(root, uid, today, "daily_work", str(ev.get("id", "") or ""), bonus_text)
+
+            extra = f"\n\n✦ 今日奇遇：{bonus_text}" if bonus_text else ""
+            return True, f"{event_text_pool}\n获得 {reward} {coin_name}！\n当前余额：{wallet[uid]} {coin_name}{extra}"
 
         return self.store.update(op)
 

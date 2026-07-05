@@ -7,6 +7,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 from .storage import JsonStore
 from .economy import EconomyService
+from .image_output import save_scaled_image
 
 
 def today_str() -> str:
@@ -52,6 +53,7 @@ class SignService:
         cache_dir: Path,
         quote_file: Path,
         runtime_config_provider: Callable[[], Dict] | None = None,
+        events=None,
     ):
         self.store = store
         self.economy = economy
@@ -64,6 +66,7 @@ class SignService:
         self.cache_dir = Path(cache_dir)
         self.quote_file = Path(quote_file)
         self.runtime_config_provider = runtime_config_provider
+        self.events = events
 
     def _runtime(self) -> Dict:
         if callable(self.runtime_config_provider):
@@ -84,6 +87,15 @@ class SignService:
         low = max(0, int(rules.get("sign_min_reward", self.sign_min)))
         high = max(low, int(rules.get("sign_max_reward", self.sign_max)))
         return low, high
+
+    def _output_image_scale(self) -> float:
+        render = self._runtime().get("render", {})
+        if not isinstance(render, dict):
+            render = {}
+        try:
+            return max(0.4, min(1.0, float(render.get("output_image_scale", 0.85))))
+        except Exception:
+            return 0.85
 
     def _random_quote(self) -> Tuple[str, str]:
         try:
@@ -110,6 +122,18 @@ class SignService:
         inc = random.randint(sign_min, sign_max)
         quote, quote_from = self._random_quote()
 
+        # 预先抽取今日奇遇（纯计算，不写盘）；命中则在 op 内同事务应用
+        event_roll = None
+        if self.events is not None:
+            today_anchor_count = self.events.today_anchor_count(self.store, uid, today, "sign")
+            triggered_ids = self.events.today_triggered_ids(self.store, uid, today)
+            try:
+                event_roll = self.events.roll("sign", None, today_anchor_count, triggered_ids)
+            except Exception:
+                event_roll = None
+        event_text = ""
+        event_coin = 0
+
         def op(root):
             sign = root.setdefault("sign", {})
             wallet = root.setdefault("wallet", {})
@@ -123,6 +147,16 @@ class SignService:
             user["last_nickname"] = nickname
             wallet[uid] = int(wallet.get(uid, 0)) + inc
 
+            # 今日奇遇：同事务加 coin、写 event_log/event_state
+            nonlocal event_text, event_coin
+            if event_roll is not None:
+                ev, deltas = event_roll
+                event_coin = int(deltas.get("coin", 0) or 0)
+                if event_coin:
+                    wallet[uid] = int(wallet.get(uid, 0)) + event_coin
+                event_text = str(ev.get("text", "") or "")
+                self.events.record_event(root, uid, today, "sign", str(ev.get("id", "") or ""), event_text)
+
             return True, {
                 "uid": uid,
                 "nickname": nickname,
@@ -131,6 +165,8 @@ class SignService:
                 "count": count,
                 "quote": quote,
                 "quote_from": quote_from,
+                "event_text": event_text,
+                "event_coin": event_coin,
             }
 
         return self.store.update(op)
@@ -171,11 +207,18 @@ class SignService:
                 return Image.open(random.choice(imgs)).convert("RGB")
             except Exception:
                 pass
+        # 回退背景：用渐变 + 光晕，避免纯色单调。
         img = Image.new("RGB", (1920, 1080), (232, 240, 255))
         d = ImageDraw.Draw(img)
-        d.rectangle((0, 0, 1920, 1080), fill=(232, 240, 255))
-        d.ellipse((-260, -260, 760, 760), fill=(190, 210, 255))
-        d.ellipse((1250, 520, 2300, 1500), fill=(255, 210, 230))
+        # 简单水平渐变（与卡片底图同色系）
+        for x in range(1920):
+            t = x / 1919
+            r = int(232 + (250 - 232) * t)
+            g = int(240 + (236 - 240) * t)
+            b = int(255 + (232 - 255) * t)
+            d.line([(x, 0), (x, 1080)], fill=(r, g, b))
+        d.ellipse((-260, -260, 760, 760), fill=(190, 210, 255, 200))
+        d.ellipse((1250, 520, 2300, 1500), fill=(255, 210, 230, 200))
         return img
 
     def _cover(self, img: Image.Image, w: int, h: int) -> Image.Image:
@@ -192,8 +235,9 @@ class SignService:
         d.rounded_rectangle((0, 0, size[0], size[1]), radius=radius, fill=255)
         return mask
 
-    def _outlined_text(self, draw: ImageDraw.ImageDraw, pos, text, font, fill=(255, 255, 255), stroke=4, anchor=None):
+    def _outlined_text(self, draw: ImageDraw.ImageDraw, pos, text, font, fill=(255, 255, 255), stroke=3, anchor=None):
         x, y = pos
+        # 描边改为半透明深色，在浅底上更柔和
         for dx in range(-stroke, stroke + 1):
             for dy in range(-stroke, stroke + 1):
                 if dx == 0 and dy == 0:
@@ -247,7 +291,7 @@ class SignService:
         name_box_x, name_box_y = -8, 30
         name_box_w, name_box_h = text_w + 80, 78
         draw.rounded_rectangle((name_box_x, name_box_y, name_box_x + name_box_w, name_box_y + name_box_h), radius=14, fill=(245, 245, 245, 180), outline=(40, 40, 40, 170), width=3)
-        self._outlined_text(draw, (32, 69), hello_text, font_hello, anchor="lm", stroke=4)
+        self._outlined_text(draw, (32, 69), hello_text, font_hello, anchor="lm", stroke=3)
 
         card_x, card_y = 630, 160
         card_w, card_h = 1190, 665
@@ -259,26 +303,26 @@ class SignService:
 
         shift_y = -45
         hword = hour_word()
-        self._outlined_text(draw, (70, 280 + shift_y), hword, font_big, anchor="lm", stroke=4)
-        self._outlined_text(draw, (72, 450 + shift_y), f"{coin_name}  +{inc}", font_mid, anchor="lm", stroke=4)
-        self._outlined_text(draw, (72, 710 + shift_y), f"{coin_name}：{balance}", font_mid, anchor="lm", stroke=4)
-        self._outlined_text(draw, (72, 820 + shift_y), datetime.now().strftime("%Y.%m.%d"), font_date, anchor="lm", stroke=4)
+        self._outlined_text(draw, (70, 280 + shift_y), hword, font_big, anchor="lm", stroke=3)
+        self._outlined_text(draw, (72, 450 + shift_y), f"{coin_name}  +{inc}", font_mid, anchor="lm", stroke=3)
+        self._outlined_text(draw, (72, 710 + shift_y), f"{coin_name}：{balance}", font_mid, anchor="lm", stroke=3)
+        self._outlined_text(draw, (72, 820 + shift_y), datetime.now().strftime("%Y.%m.%d"), font_date, anchor="lm", stroke=3)
 
         if not quote:
             quote, quote_from = self._random_quote()
 
         # 移除了状态条，直接在卡片下方显示今日一言
         quote_title_y = card_y + card_h + 30
-        self._outlined_text(draw, (72, quote_title_y), "今日一言：", font_quote_title, anchor="lm", stroke=4)
+        self._outlined_text(draw, (72, quote_title_y), "今日一言：", font_quote_title, anchor="lm", stroke=3)
 
         quote_x, quote_y = 72, int(quote_title_y + 58)
         max_w = 1250
         lines = self._wrap_text(quote, font_quote, max_w)
         for i, line in enumerate(lines[:3]):
-            self._outlined_text(draw, (quote_x, quote_y + i * 68), line, font_quote, anchor="la", stroke=4)
+            self._outlined_text(draw, (quote_x, quote_y + i * 68), line, font_quote, anchor="la", stroke=3)
 
         if quote_from:
-            self._outlined_text(draw, (canvas_w - 120, canvas_h - 70), quote_from, font_quote_title, anchor="rd", stroke=4)
+            self._outlined_text(draw, (canvas_w - 120, canvas_h - 70), quote_from, font_quote_title, anchor="rd", stroke=3)
 
-        canvas.convert("RGB").save(out, "PNG")
+        save_scaled_image(canvas.convert("RGB"), out, "PNG", scale=self._output_image_scale())
         return out

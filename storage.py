@@ -14,7 +14,19 @@ class JsonStore:
         self.load()
 
     def _default(self):
-        return {"wallet": {}, "sign": {}, "catgirls": {}, "items": {}, "item_grants": {}, "pending_adoptions": {}, "runaway_notices": {}, "runaway_catgirls": {}}
+        return {
+            "wallet": {},
+            "sign": {},
+            "catgirls": {},
+            "items": {},
+            "item_grants": {},
+            "pending_adoptions": {},
+            "runaway_notices": {},
+            "runaway_catgirls": {},
+            "daily_wishes": {},
+            "event_log": {},
+            "event_state": {},
+        }
 
     def load(self):
         with self.lock:

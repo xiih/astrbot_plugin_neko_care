@@ -121,6 +121,8 @@
     renderCareServices();
     renderInteractions();
     renderPersonalities();
+    renderDailyWishes();
+    renderEvents();
     syncFields(document);
   }
 
@@ -485,6 +487,7 @@
       ["启用互动动作", `${summary.enabled_interactions || 0}/${summary.interactions || 0}`],
       ["启用性格效果", `${summary.enabled_personalities || 0}/${summary.personalities || 0}`],
       ["启用食物", `${summary.enabled_foods || 0}/${summary.foods || 0}`],
+      ["启用心愿模板", `${summary.enabled_daily_wish_templates || 0}/${summary.daily_wish_templates || 0}`],
       ["钱包总额", summary.wallet_total || 0],
       ["最高余额", summary.wallet_max || 0],
       ["待确认收养", summary.pending_adoptions || 0],
@@ -502,12 +505,15 @@
       ["许愿概率", `${Math.round(Number(wish.probability || 0) * 100)}%`],
       ["许愿保底", `${wish.pity || 1} 次`],
       ["形象价格", wish.appearance_change_price || 0],
+      ["图片比例", `${Math.round(Number(config.render?.output_image_scale ?? 0.85) * 100)}%`],
       ["饱食耗尽", `${formatHours(care.satiety_decay_minutes || 0)}`],
       ["离家判定", `${care.runaway_after_zero_hours || 0} 小时`],
       ["互动软上限", Number(care.interaction_daily_limit || 0) ? `${care.interaction_daily_limit} 次/天` : "不限"],
       ["互动冷却", Number(care.interaction_cooldown_seconds || 0) ? `${care.interaction_cooldown_seconds} 秒` : "无"],
       ["高精力打工", `${care.work_high_energy_threshold || 0}+ 精力`],
       ["礼物软上限", Number(config.shop?.gift_daily_limit || 0) ? `${config.shop.gift_daily_limit} 次/天` : "不限"],
+      ["每日心愿", config.daily_wishes?.enabled === false ? "关闭" : "开启"],
+      ["心愿刷新", `${config.daily_wishes?.refresh_at_hour ?? 4}:00`],
     ];
     document.getElementById("ruleGrid").innerHTML = rules
       .map(([label, value]) => `<div class="rule"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`)
@@ -714,6 +720,128 @@
     document.getElementById("personalitiesTable").innerHTML = `<table><thead>${head}</thead><tbody>${body}</tbody></table>`;
   }
 
+  function renderDailyWishes() {
+    const rows = state.config.daily_wishes?.templates || [];
+    const wishTypeOptions = ["feed", "interact", "cat_work", "buy_gift", "care"];
+    const body = rows
+      .map(
+        (_, index) => `
+          <tr>
+            <td class="checkbox-cell"><input data-path="daily_wishes.templates.${index}.enabled" type="checkbox" /></td>
+            <td><input data-path="daily_wishes.templates.${index}.id" type="text" maxlength="40" /></td>
+            <td><input data-path="daily_wishes.templates.${index}.name" type="text" maxlength="40" /></td>
+            <td><select data-path="daily_wishes.templates.${index}.type">${wishTypeOptions.map((t) => `<option value="${escapeAttr(t)}">${escapeHtml(t)}</option>`).join("")}</select></td>
+            <td><input data-path="daily_wishes.templates.${index}.target_name" type="text" maxlength="40" placeholder="可留空" /></td>
+            <td><input data-path="daily_wishes.templates.${index}.target" type="number" min="1" step="1" class="narrow" /></td>
+            <td><textarea data-path="daily_wishes.templates.${index}.text" maxlength="140"></textarea></td>
+            <td><input data-path="daily_wishes.templates.${index}.reward_min" type="number" min="0" step="1" class="narrow" /></td>
+            <td><input data-path="daily_wishes.templates.${index}.reward_max" type="number" min="0" step="1" class="narrow" /></td>
+            <td><input data-path="daily_wishes.templates.${index}.intimacy_min" type="number" min="0" step="1" class="narrow" /></td>
+            <td><input data-path="daily_wishes.templates.${index}.intimacy_max" type="number" min="0" step="1" class="narrow" /></td>
+            <td><input data-path="daily_wishes.templates.${index}.growth_min" type="number" min="0" step="1" class="narrow" /></td>
+            <td><input data-path="daily_wishes.templates.${index}.growth_max" type="number" min="0" step="1" class="narrow" /></td>
+            <td><input data-path="daily_wishes.templates.${index}.min_stage" type="number" min="0" max="6" step="1" class="narrow" /></td>
+            <td><button class="icon-button" data-action="remove" data-list="daily_wishes.templates" data-index="${index}" type="button" title="删除">X</button></td>
+          </tr>`
+      )
+      .join("");
+    document.getElementById("dailyWishesTable").innerHTML = `
+      <table>
+        <thead><tr><th>启用</th><th>ID</th><th>名称</th><th>类型</th><th>具体目标</th><th>目标次数</th><th>心愿文本</th><th>宝石下限</th><th>宝石上限</th><th>亲密下限</th><th>亲密上限</th><th>成长下限</th><th>成长上限</th><th>阶段</th><th></th></tr></thead>
+        <tbody>${body}</tbody>
+      </table>`;
+  }
+
+  function renderEvents() {
+    renderEventItems();
+    renderWorkFinishTexts();
+    renderPersonalityEvents();
+  }
+
+  function renderEventItems() {
+    const rows = state.config.events?.items || [];
+    const anchorOptions = ["sign", "daily_work", "feed", "cat_work_finish", "interact"];
+    const body = rows
+      .map(
+        (_, index) => `
+          <tr>
+            <td class="checkbox-cell"><input data-path="events.items.${index}.enabled" type="checkbox" /></td>
+            <td><input data-path="events.items.${index}.id" type="text" maxlength="40" /></td>
+            <td><select data-path="events.items.${index}.anchor">${anchorOptions.map((a) => `<option value="${escapeAttr(a)}">${escapeHtml(a)}</option>`).join("")}</select></td>
+            <td><input data-path="events.items.${index}.prob" type="number" min="0" max="1" step="0.01" class="narrow" /></td>
+            <td><textarea data-path="events.items.${index}.text" maxlength="160"></textarea></td>
+            <td><input data-path="events.items.${index}.coin_min" type="number" step="1" class="narrow" /></td>
+            <td><input data-path="events.items.${index}.coin_max" type="number" step="1" class="narrow" /></td>
+            <td><input data-path="events.items.${index}.mood" type="number" step="1" class="narrow" /></td>
+            <td><input data-path="events.items.${index}.energy" type="number" step="1" class="narrow" /></td>
+            <td><input data-path="events.items.${index}.intimacy" type="number" step="1" class="narrow" /></td>
+            <td><input data-path="events.items.${index}.growth" type="number" step="1" class="narrow" /></td>
+            <td><input data-path="events.items.${index}.min_stage" type="number" min="0" max="6" step="1" class="narrow" /></td>
+            <td><button class="icon-button" data-action="remove" data-list="events.items" data-index="${index}" type="button" title="删除">X</button></td>
+          </tr>`
+      )
+      .join("");
+    document.getElementById("eventsTable").innerHTML = `
+      <table>
+        <thead><tr><th>启用</th><th>ID</th><th>锚点</th><th>概率</th><th>文本</th><th>宝石下限</th><th>宝石上限</th><th>心情</th><th>精力</th><th>亲密</th><th>成长</th><th>阶段</th><th></th></tr></thead>
+        <tbody>${body}</tbody>
+      </table>`;
+  }
+
+  function renderWorkFinishTexts() {
+    renderTextList("workSurpriseTexts", "events.work_finish.surprise.texts", 160);
+    renderTextList("workAccidentTexts", "events.work_finish.accident.texts", 160);
+  }
+
+  function renderTextList(containerId, path, maxLength) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    const rows = getPath(state.config, path);
+    const values = Array.isArray(rows) ? rows : [];
+    container.innerHTML = values
+      .map(
+        (_, index) => `
+          <div class="text-row">
+            <input data-path="${escapeAttr(path)}.${index}" type="text" maxlength="${maxLength}" />
+            <button class="icon-button" data-action="remove" data-list="${escapeAttr(path)}" data-index="${index}" type="button" title="删除">X</button>
+          </div>`
+      )
+      .join("");
+  }
+
+  function renderPersonalityEvents() {
+    const rows = state.config.events?.personality_events || [];
+    const personalities = state.options?.personalities || [];
+    const anchorOptions = ["interact", "feed", "cat_work_finish"];
+    const personalityCells = personalities.length
+      ? personalities.map((p) => `<option value="${escapeAttr(p)}">${escapeHtml(p)}</option>`).join("")
+      : `<option value=""></option>`;
+    const body = rows
+      .map(
+        (_, index) => `
+          <tr>
+            <td class="checkbox-cell"><input data-path="events.personality_events.${index}.enabled" type="checkbox" /></td>
+            <td><input data-path="events.personality_events.${index}.id" type="text" maxlength="40" /></td>
+            <td><select data-path="events.personality_events.${index}.personality">${personalityCells}</select></td>
+            <td><select data-path="events.personality_events.${index}.anchor">${anchorOptions.map((a) => `<option value="${escapeAttr(a)}">${escapeHtml(a)}</option>`).join("")}</select></td>
+            <td><input data-path="events.personality_events.${index}.prob" type="number" min="0" max="1" step="0.01" class="narrow" /></td>
+            <td><textarea data-path="events.personality_events.${index}.text" maxlength="160"></textarea></td>
+            <td><input data-path="events.personality_events.${index}.mood" type="number" step="1" class="narrow" /></td>
+            <td><input data-path="events.personality_events.${index}.energy" type="number" step="1" class="narrow" /></td>
+            <td><input data-path="events.personality_events.${index}.intimacy" type="number" step="1" class="narrow" /></td>
+            <td><input data-path="events.personality_events.${index}.growth" type="number" step="1" class="narrow" /></td>
+            <td><input data-path="events.personality_events.${index}.min_stage" type="number" min="0" max="6" step="1" class="narrow" /></td>
+            <td><button class="icon-button" data-action="remove" data-list="events.personality_events" data-index="${index}" type="button" title="删除">X</button></td>
+          </tr>`
+      )
+      .join("");
+    document.getElementById("personalityEventsTable").innerHTML = `
+      <table>
+        <thead><tr><th>启用</th><th>ID</th><th>性格</th><th>锚点</th><th>概率</th><th>文本</th><th>心情</th><th>精力</th><th>亲密</th><th>成长</th><th>阶段</th><th></th></tr></thead>
+        <tbody>${body}</tbody>
+      </table>`;
+  }
+
   function handleFieldChange(event) {
     const target = event.target;
     if (!target || !target.dataset || !target.dataset.path || !state.config) return;
@@ -833,6 +961,79 @@
       growth_min: 2,
       growth_max: 4,
       energy_cost: 0,
+      min_stage: 0,
+      enabled: true,
+    });
+    renderAll();
+    markDirty();
+  });
+
+  document.getElementById("addDailyWish").addEventListener("click", () => {
+    const id = `wish_${Date.now()}`;
+    ensureArray("daily_wishes.templates").push({
+      id,
+      name: "新心愿",
+      type: "interact",
+      target_name: "新互动",
+      target: 1,
+      text: "她今天有一个小心愿。",
+      reward_min: 30,
+      reward_max: 60,
+      intimacy_min: 2,
+      intimacy_max: 5,
+      growth_min: 1,
+      growth_max: 3,
+      min_stage: 0,
+      enabled: true,
+    });
+    renderAll();
+    markDirty();
+  });
+
+  document.getElementById("addWorkSurpriseText").addEventListener("click", () => {
+    ensureArray("events.work_finish.surprise.texts").push("她今天遇到了惊喜奇遇，带回了额外报酬。");
+    renderAll();
+    markDirty();
+  });
+
+  document.getElementById("addWorkAccidentText").addEventListener("click", () => {
+    ensureArray("events.work_finish.accident.texts").push("她今天打工时遇到了一点小意外，拿到补偿后心情有些低落。");
+    renderAll();
+    markDirty();
+  });
+
+  document.getElementById("addEvent").addEventListener("click", () => {
+    const id = `event_${Date.now()}`;
+    ensureArray("events.items").push({
+      id,
+      anchor: "sign",
+      prob: 0.10,
+      text: "今日奇遇发生了。",
+      coin_min: 0,
+      coin_max: 0,
+      mood: 0,
+      energy: 0,
+      intimacy: 0,
+      growth: 0,
+      min_stage: 0,
+      enabled: true,
+    });
+    renderAll();
+    markDirty();
+  });
+
+  document.getElementById("addPersonalityEvent").addEventListener("click", () => {
+    const id = `pevent_${Date.now()}`;
+    ensureArray("events.personality_events").push({
+      id,
+      personality: firstOption("personalities", "温柔"),
+      anchor: "interact",
+      prob: 0.08,
+      text: "性格专属奇遇。",
+      mood: 2,
+      energy: 0,
+      intimacy: 2,
+      growth: 1,
       min_stage: 0,
       enabled: true,
     });

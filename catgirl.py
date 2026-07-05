@@ -10,12 +10,13 @@ import aiohttp
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
-from typing import Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps
 
 from .storage import JsonStore
 from .economy import EconomyService
+from .image_output import save_scaled_image
 from .catgirl_schema import (
     CATGIRL_SCHEMA_VERSION,
     WEIGHT_UNIT,
@@ -64,6 +65,32 @@ RENAME_CARD_ID = "rename_card"
 APPEARANCE_CARD_ID = "appearance_card"
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
+# ---- 设计 token：统一所有卡片的配色与圆角 ----
+# 主色降饱和、提高明度一致性，避免原 #FF8C00 + #00BFFF 的撞色观感。
+NEKO_THEME = {
+    "primary": (232, 131, 58),      # 标题 / 关键数值：暖橙降饱和
+    "primary_alpha": (232, 131, 58, 255),
+    "accent": (91, 141, 184),       # 强调：莫兰迪灰蓝
+    "pink": (214, 123, 166),        # 互动 / 心情：莫兰迪粉
+    "green": (110, 173, 124),       # 健康 / 成长：低饱和绿
+    "purple": (135, 121, 184),      # 成长 / 档位：低饱和紫
+    "text": (58, 62, 68),           # 正文：近黑深灰
+    "text_dark": (38, 42, 48),      # 猫娘名 / 重点正文
+    "muted": (138, 144, 150),       # 次要文字
+    "panel_fill": (255, 255, 255, 200),    # 面板底色
+    "panel_outline": (255, 255, 255, 210), # 面板描边（浅白）
+    "card_outline": (255, 255, 255, 215),  # 卡片描边
+    "row_a": (255, 250, 244, 175),        # 表格奇数行
+    "row_b": (252, 244, 236, 160),        # 表格偶数行
+    "shadow": (0, 0, 0, 26),              # 阴影：中性灰
+    "radius_card": 22,
+    "radius_panel": 14,
+    "radius_cell": 10,
+    "radius_bar": 12,
+    "shadow_offset": (0, 6),
+    "shadow_blur": 14,
+}
+
 
 class CatgirlService:
     def __init__(
@@ -80,6 +107,7 @@ class CatgirlService:
         wish_pity: int = 3,
         appearance_change_price: int = 900,
         runtime_config_provider: Callable[[], Dict] | None = None,
+        events: "EventService | None" = None,
     ):
         self.store = store
         self.economy = economy
@@ -93,6 +121,15 @@ class CatgirlService:
         self.wish_pity = int(wish_pity)
         self.appearance_change_price = int(appearance_change_price)
         self.runtime_config_provider = runtime_config_provider
+        self.events = events
+        self.daily_wish_status_provider = None
+        self.theme = NEKO_THEME
+        # 渐变背景缓存：(w, h) -> Image，避免每次渲染都重算逐像素渐变
+        self._bg_cache: Dict[Tuple[int, int], Image.Image] = {}
+        self._mask_cache: Dict[Tuple[int, int, int], Image.Image] = {}
+        # 限制缓存条数，避免长驻进程无限增长
+        self._bg_cache_limit = 24
+        self._mask_cache_limit = 256
 
     def _runtime(self) -> Dict:
         if callable(self.runtime_config_provider):
@@ -118,6 +155,13 @@ class CatgirlService:
         pity = max(1, int(wish.get("pity", self.wish_pity)))
         price = max(0, int(wish.get("appearance_change_price", self.appearance_change_price)))
         return probability, pity, price
+
+    def _output_image_scale(self) -> float:
+        render = self._rules("render")
+        try:
+            return max(0.4, min(1.0, float(render.get("output_image_scale", 0.85))))
+        except Exception:
+            return 0.85
 
     def _care_rules(self) -> Dict:
         care = self._rules("care")
@@ -283,14 +327,71 @@ class CatgirlService:
 
         return self.store.update(op)
 
-    def _font(self, size: int):
-        for p in [self.font_dir / "GBK.TTF", self.font_dir / "FZKATJW.ttf", self.base_dir / "GBK.TTF"]:
+    def _daily_wish_status_brief(self, uid: str) -> Dict[str, Any]:
+        provider = getattr(self, "daily_wish_status_provider", None)
+        if not callable(provider):
+            return {}
+        try:
+            data = provider(uid)
+        except Exception:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _font(self, size: int, role: str = "body"):
+        """按角色选字体：title=卡通体(猫娘题材)，body/num=黑体。"""
+        if role == "title":
+            candidates = [
+                self.font_dir / "FZKATJW.ttf",
+                self.font_dir / "GBK.TTF",
+                self.base_dir / "FZKATJW.ttf",
+            ]
+        else:
+            candidates = [self.font_dir / "GBK.TTF", self.font_dir / "FZKATJW.ttf", self.base_dir / "GBK.TTF"]
+        for p in candidates:
             if p.exists():
                 try:
                     return ImageFont.truetype(str(p), size)
                 except Exception:
                     pass
         return ImageFont.load_default()
+
+    def _title_font(self, size: int):
+        return self._font(size, role="title")
+
+    def _metric_palette(self, label: str, idx: int = 0):
+        t = self.theme
+        palettes = [
+            (t["primary"], (200, 96, 36)),   # 0 饱食
+            (t["pink"], (190, 92, 132)),     # 1 心情
+            (t["green"], (74, 154, 96)),     # 2 健康
+            (t["accent"], (52, 108, 148)),   # 3 精力
+            (t["pink"], (200, 96, 60)),      # 4 亲密
+            (t["purple"], (104, 86, 168)),   # 5 成长
+            (t["accent"], (60, 120, 160)),   # 6 效率/报酬/获得/余额
+            ((172, 177, 182), (132, 139, 145)),  # 7 体重
+        ]
+        text = str(label)
+        preferred = {
+            "饱食": 0,
+            "心情": 1,
+            "健康": 2,
+            "精力": 3,
+            "亲密": 4,
+            "成长": 5,
+            "效率": 6,
+            "报酬": 6,
+            "获得": 6,
+            "余额": 6,
+            "体重": 7,
+            "耗时": 3,
+            "剩余": 3,
+            "档位": 5,
+            "加成": 5,
+        }
+        for key, value in preferred.items():
+            if key in text:
+                return palettes[value]
+        return palettes[idx % len(palettes)]
 
     def _all_default_images(self):
         imgs = []
@@ -747,25 +848,6 @@ class CatgirlService:
             return float(rules["interaction_heavy_limit_multiplier"]), "重度递减"
         return float(rules["interaction_minimal_limit_multiplier"]), "极低收益"
 
-    def _interaction_status_line(self, cat: Dict) -> str:
-        today_count = int(((cat or {}).get("interactions") or {}).get(today_str(), 0) or 0)
-        mood_multiplier, mood_label = self._mood_interaction_multiplier(cat)
-        daily_multiplier, daily_label = self._interaction_daily_multiplier(today_count)
-        multiplier = mood_multiplier * daily_multiplier
-        limit = int(self._care_rules()["interaction_daily_limit"])
-        count_text = f"{today_count}/{limit}" if limit else f"{today_count}/不限"
-        return f"互动收益：{self._fmt_percent(multiplier * 100)}（{mood_label}，{daily_label}，今日 {count_text}）"
-
-    def _health_trend_line(self, cat: Dict) -> str:
-        rules = self._care_rules()
-        satiety = float((cat or {}).get("satiety", 0) or 0)
-        mood = float((cat or {}).get("mood", 0) or 0)
-        if satiety < rules["health_hungry_satiety_threshold"]:
-            return "健康趋势：饥饿下降"
-        if mood < rules["health_low_mood_threshold"]:
-            return "健康趋势：心情低落下降"
-        return "健康趋势：缓慢恢复"
-
     def _work_energy_tier(self, energy: float) -> Tuple[str, float]:
         rules = self._care_rules()
         energy = float(energy or 0)
@@ -774,10 +856,6 @@ class CatgirlService:
         if energy >= rules["work_stable_energy_threshold"]:
             return "稳定打工", float(rules["work_stable_energy_reward_multiplier"])
         return "普通打工", 1.0
-
-    def _energy_status_line(self, cat: Dict) -> str:
-        tier, multiplier = self._work_energy_tier(float((cat or {}).get("energy", 0) or 0))
-        return f"精力状态：{tier}（打工报酬 {self._fmt_percent(multiplier * 100)}）"
 
     def _format_duration(self, seconds: int) -> str:
         seconds = max(0, int(seconds))
@@ -844,100 +922,95 @@ class CatgirlService:
         return tuple(int(round(a[i] + (b[i] - a[i]) * t)) for i in range(3))
 
     def _make_linear_gradient(self, size, stops):
-        w, h = size
-        img = Image.new("RGB", size)
-        px = img.load()
+        """生成水平线性渐变。按 1D 向量化构造再垂直广播，避免逐像素循环。"""
+        w, h = max(1, int(size[0])), max(1, int(size[1]))
         stops = sorted((max(0.0, min(1.0, float(pos))), tuple(color)) for pos, color in stops)
         if not stops:
-            return img
-        for x in range(w):
-            t = x / max(1, w - 1)
-            left = stops[0]
-            right = stops[-1]
+            return Image.new("RGB", (w, h))
+        # 分段插值：对每个 x 算颜色，得到 (w, 3) 的颜色行，再 resize 到整张图。
+        ts = [i / max(1, w - 1) for i in range(w)]
+        colors = []
+        for t in ts:
+            left, right = stops[0], stops[-1]
             for idx in range(len(stops) - 1):
                 if stops[idx][0] <= t <= stops[idx + 1][0]:
                     left, right = stops[idx], stops[idx + 1]
                     break
             span = max(0.0001, right[0] - left[0])
-            color = self._lerp_color(left[1], right[1], (t - left[0]) / span)
-            for y in range(h):
-                px[x, y] = color
+            colors.append(self._lerp_color(left[1], right[1], (t - left[0]) / span))
+        row = Image.new("RGB", (w, 1))
+        row.putdata(colors)
+        # 垂直广播：resize 一行到 h 高度即可
+        img = row.resize((w, h), Image.NEAREST)
         return img
 
     def _make_card_background(self, size):
-        w, h = size
+        w, h = max(1, int(size[0])), max(1, int(size[1]))
+        cached = self._bg_cache.get((w, h))
+        if cached is not None:
+            return cached.copy()
         bg = self._make_linear_gradient(
-            size,
+            (w, h),
             [
-                (0.00, (218, 248, 255)),
-                (0.42, (248, 253, 255)),
-                (0.70, (255, 247, 238)),
-                (1.00, (255, 226, 220)),
+                (0.00, (226, 244, 250)),  # 浅蓝白
+                (0.42, (247, 250, 252)),
+                (0.70, (253, 246, 240)),  # 浅暖白
+                (1.00, (250, 236, 232)),  # 浅暖橘
             ],
         ).convert("RGBA")
-        glow = Image.new("RGBA", size, (255, 255, 255, 0))
+        glow = Image.new("RGBA", (w, h), (255, 255, 255, 0))
         gd = ImageDraw.Draw(glow)
-        gd.ellipse((-160, 90, 360, 610), fill=(120, 213, 239, 72))
-        gd.ellipse((w - 430, -170, w + 150, 360), fill=(255, 182, 170, 70))
-        gd.ellipse((w - 430, h - 360, w + 180, h + 180), fill=(255, 202, 126, 52))
-        return Image.alpha_composite(bg, glow.filter(ImageFilter.GaussianBlur(52))).convert("RGB")
+        # 光晕颜色对齐 theme，降低强度，更柔和
+        gd.ellipse((-160, 90, 360, 610), fill=(170, 206, 226, 56))
+        gd.ellipse((w - 430, -170, w + 150, 360), fill=(244, 198, 196, 54))
+        gd.ellipse((w - 430, h - 360, w + 180, h + 180), fill=(248, 210, 168, 42))
+        out = Image.alpha_composite(bg, glow.filter(ImageFilter.GaussianBlur(52))).convert("RGB")
+        if len(self._bg_cache) >= self._bg_cache_limit:
+            # 简单 FIFO 淘汰最早的 key
+            self._bg_cache.pop(next(iter(self._bg_cache)))
+        self._bg_cache[(w, h)] = out
+        return out.copy()
 
     def _rounded_mask(self, size, radius: int):
+        key = (int(size[0]), int(size[1]), int(radius))
+        cached = self._mask_cache.get(key)
+        if cached is not None:
+            return cached.copy()
         mask = Image.new("L", size, 0)
         ImageDraw.Draw(mask).rounded_rectangle((0, 0, size[0], size[1]), radius=radius, fill=255)
-        return mask
+        if len(self._mask_cache) >= self._mask_cache_limit:
+            self._mask_cache.pop(next(iter(self._mask_cache)))
+        self._mask_cache[key] = mask
+        return mask.copy()
 
     def _paste_round(self, canvas: Image.Image, img: Image.Image, box, radius: int):
         x, y, w, h = box
         mask = self._rounded_mask((w, h), radius)
         canvas.paste(img.convert("RGBA"), (x, y), mask)
 
+    def _draw_shadow(self, canvas: Image.Image, box, radius: int):
+        """绘制柔和投影。颜色/偏移/模糊来自 theme，避免硬编码。"""
+        x1, y1, x2, y2 = [int(v) for v in box]
+        t = self.theme
+        ox, oy = t["shadow_offset"]
+        sb = t["shadow_blur"]
+        shadow_img = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+        sd = ImageDraw.Draw(shadow_img)
+        sd.rounded_rectangle((x1 + ox, y1 + oy, x2 + ox, y2 + oy), radius=radius, fill=t["shadow"])
+        canvas.alpha_composite(shadow_img.filter(ImageFilter.GaussianBlur(sb)))
+
     def _draw_round_panel(self, canvas: Image.Image, box, radius: int, fill, outline=None, width: int = 1, shadow=True):
         x1, y1, x2, y2 = [int(v) for v in box]
         if shadow:
-            shadow_img = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
-            sd = ImageDraw.Draw(shadow_img)
-            sd.rounded_rectangle((x1 + 5, y1 + 8, x2 + 5, y2 + 8), radius=radius, fill=(74, 122, 154, 28))
-            canvas.alpha_composite(shadow_img.filter(ImageFilter.GaussianBlur(12)))
+            self._draw_shadow(canvas, box, radius)
         d = ImageDraw.Draw(canvas, "RGBA")
         d.rounded_rectangle((x1, y1, x2, y2), radius=radius, fill=fill, outline=outline, width=width)
 
-    def _metric_palette(self, label: str, idx: int = 0):
-        palettes = [
-            ((255, 190, 113), (255, 137, 22)),
-            ((244, 127, 179), (211, 79, 154)),
-            ((128, 226, 150), (69, 193, 124)),
-            ((104, 201, 236), (58, 159, 217)),
-            ((248, 115, 101), (229, 77, 61)),
-            ((183, 121, 238), (135, 96, 219)),
-            ((120, 190, 218), (255, 143, 23)),
-            ((172, 177, 182), (132, 139, 145)),
-        ]
-        text = str(label)
-        preferred = {
-            "饱食": 0,
-            "心情": 1,
-            "健康": 2,
-            "精力": 3,
-            "亲密": 4,
-            "成长": 5,
-            "效率": 6,
-            "报酬": 6,
-            "获得": 6,
-            "余额": 6,
-            "体重": 7,
-            "耗时": 3,
-            "剩余": 3,
-            "档位": 5,
-            "加成": 5,
-        }
-        for key, value in preferred.items():
-            if key in text:
-                return palettes[value]
-        return palettes[idx % len(palettes)]
-
     def _metric_progress(self, label: str, value: str, cat: Optional[Dict]):
+        """返回 0~1 进度，仅当数据有明确的上限语义（0~100 / x/total / 百分比 / 状态条字段）时。
+        对余额、体重、宝石数量、亲密等级、档位等无固定上限的数据返回 None，不画进度条。"""
         raw = str(value or "")
+        # 1) 显式 x/total 形式：有明确上限，可量化
         ratio = re.search(r"(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)", raw)
         if ratio:
             try:
@@ -953,11 +1026,11 @@ class CatgirlService:
         except Exception:
             first_num = None
             number = 0.0
-        if not first_num and raw:
-            return 0.72
-        if "%" in raw:
-            return clamp(number, 0, 100) / 100
+        if not first_num:
+            # 纯文字值（如体型「匀称」、性格名）无量化语义
+            return None
         label = str(label or "")
+        # 2) 饱食/心情/健康/精力：固定 0~100，从猫娘档案取真实值
         if any(key in label for key in ("饱食", "心情", "健康", "精力")) and cat:
             field = {"饱食": "satiety", "心情": "mood", "健康": "health", "精力": "energy"}
             for key, attr in field.items():
@@ -965,48 +1038,85 @@ class CatgirlService:
                     try:
                         return clamp(float(cat.get(attr, 0) or 0), 0, 100) / 100
                     except Exception:
-                        return 0
+                        return None
+        # 3) 成长进度：返回值带 % 且在 0~100，可量化
         if "成长" in label and cat:
             try:
                 return clamp(float(self._growth_display(cat).rstrip("%")), 0, 100) / 100
             except Exception:
                 pass
-        if raw.startswith(("+", "-")):
-            return clamp(abs(number), 0, 30) / 30
-        if "Lv." in raw:
-            return clamp(number, 1, 20) / 20
-        return clamp(abs(number), 0, 100) / 100
+        # 4) 显式百分号：可量化
+        if "%" in raw:
+            return clamp(number, 0, 100) / 100
+        # 其余（余额、体重、宝石数量、亲密等级 Lv.x、档位、加成、耗时、报酬等）无固定上限，不画进度条
+        return None
 
     def _draw_gradient_bar(self, canvas: Image.Image, box, colors, progress: float, text: str = "", font=None):
+        """进度条：3x 超采样抗锯齿 + 1px 细描边 + 玻璃高光。
+        小尺寸 rounded_rectangle 直接画会锯齿，所以在 3 倍分辨率上画完再 LANCZOS 缩回。
+        """
         x1, y1, x2, y2 = [int(v) for v in box]
-        radius = max(4, (y2 - y1) // 2)
+        bar_w = max(1, x2 - x1)
+        bar_h = max(1, y2 - y1)
+        radius = max(3, min(bar_h // 2, 6))
         d = ImageDraw.Draw(canvas, "RGBA")
-        bg = self._make_linear_gradient(
-            (max(1, x2 - x1), max(1, y2 - y1)),
-            [
-                (0, self._lerp_color(colors[0], (255, 255, 255), 0.76)),
-                (0.62, self._lerp_color(colors[1], (255, 255, 255), 0.82)),
-                (1, self._lerp_color(colors[1], (255, 255, 255), 0.88)),
-            ],
-        ).convert("RGBA")
-        bg.putalpha(135)
-        bg_mask = self._rounded_mask((x2 - x1, y2 - y1), radius)
-        canvas.paste(bg, (x1, y1), bg_mask)
-        d.rounded_rectangle((x1, y1, x2, y2), radius=radius, outline=(*self._lerp_color(colors[1], (70, 70, 70), 0.25), 115), width=2)
-        progress = max(0.04, min(1.0, float(progress or 0)))
-        fill_w = max(radius * 2, int((x2 - x1) * progress))
-        grad = self._make_linear_gradient((fill_w, y2 - y1), [(0, colors[0]), (0.62, colors[1]), (1, self._lerp_color(colors[1], (255, 255, 255), 0.32))]).convert("RGBA")
-        mask = self._rounded_mask((fill_w, y2 - y1), radius)
-        canvas.paste(grad, (x1, y1), mask)
+
+        # 超采样倍数：3x 足以消除 12px 高圆角的锯齿
+        ss = 3
+        sw, sh = bar_w * ss, bar_h * ss
+        sr = radius * ss
+
+        progress = max(0.0, min(1.0, float(progress or 0)))
+
+        # palette 取色
+        c0 = colors[0]
+        c1 = colors[1] if len(colors) > 1 else colors[0]
+        # 描边色：palette 深端再压暗一点
+        stroke_color = tuple(max(0, int(v * 0.55)) for v in c1)
+
+        # ---- 在超采样画布上绘制 ----
+        bar = Image.new("RGBA", (sw, sh), (0, 0, 0, 0))
+        bd = ImageDraw.Draw(bar)
+
+        # 轨道：半透明白底
+        bd.rounded_rectangle((0, 0, sw - 1, sh - 1), radius=sr, fill=(255, 255, 255, 80))
+
+        # 填充
+        if progress > 0:
+            fill_w = max(sr, int(sw * progress))
+            # 超采样渐变（直接用 _make_linear_gradient 在大尺寸生成）
+            fill = self._make_linear_gradient((fill_w, sh), [(0, c0), (1, c1)]).convert("RGBA")
+            # 顶部高光
+            hl_h = max(1, int(sh * 0.40))
+            highlight = Image.new("RGBA", (fill_w, sh), (0, 0, 0, 0))
+            hd = ImageDraw.Draw(highlight)
+            for hy in range(hl_h):
+                alpha = int(70 * (1 - hy / max(1, hl_h)))
+                hd.line([(0, hy), (fill_w, hy)], fill=(255, 255, 255, alpha))
+            fill = Image.alpha_composite(fill, highlight)
+            # 用圆角 mask 裁填充
+            fill_mask = self._rounded_mask((fill_w, sh), sr)
+            bar.paste(fill, (0, 0), fill_mask)
+
+        # 1px 细描边（超采样下是 ss px，缩回后约 1px）
+        bd.rounded_rectangle((0, 0, sw - 1, sh - 1), radius=sr, outline=stroke_color + (180,), width=max(1, ss - 1))
+
+        # 缩回原尺寸，LANCZOS 高质量
+        bar = bar.resize((bar_w, bar_h), Image.LANCZOS)
+        canvas.alpha_composite(bar, (x1, y1))
+
         if text and font:
             text_w = self._text_size(d, text, font)[0]
-            tx = min(x1 + fill_w - 18, x2 - 18)
-            if tx - text_w < x1 + 14:
-                tx = x1 + fill_w // 2
+            fill_w_orig = max(radius, int(bar_w * progress))
+            tx = min(x1 + fill_w_orig + 8, x2 - text_w - 6)
+            if tx < x1 + fill_w_orig + 8:
+                tx = x1 + fill_w_orig // 2
                 anchor = "mm"
+                fill_color = (255, 255, 255, 245)
             else:
-                anchor = "rm"
-            d.text((tx, y1 + (y2 - y1) // 2 + 1), text, font=font, fill=(255, 255, 255, 245), anchor=anchor)
+                anchor = "lm"
+                fill_color = (60, 66, 72, 255)
+            d.text((tx, y1 + bar_h // 2 + 1), text, font=font, fill=fill_color, anchor=anchor)
 
     def _draw_diamond_icon(self, draw: ImageDraw.ImageDraw, cx: int, cy: int, size: int):
         w = int(size)
@@ -1060,13 +1170,14 @@ class CatgirlService:
         tag: str = "showcase",
     ) -> Path:
         lines = [str(x) for x in (lines or []) if str(x).strip()]
+        t = self.theme
         width = 780
         padding = 20
         header_h = 105
         image_w, image_h = 700, 820
-        title_font = self._font(48)
+        title_font = self._title_font(48)
         sub_font = self._font(25)
-        name_font = self._font(39)
+        name_font = self._title_font(39)
         text_font = self._font(30)
         small_font = self._font(26)
         line_h = 45
@@ -1095,21 +1206,18 @@ class CatgirlService:
 
         canvas = self._make_card_background((width, height)).convert("RGBA")
         draw = ImageDraw.Draw(canvas, "RGBA")
-        orange = (255, 139, 24)
-        dark = (18, 22, 26)
-        muted = (74, 82, 88)
-        draw.text((width // 2, padding + 6), title, font=title_font, fill=orange, anchor="ma")
+        draw.text((width // 2, padding + 6), title, font=title_font, fill=t["primary"], anchor="ma")
         if subtitle:
-            draw.text((width // 2, padding + 64), subtitle, font=sub_font, fill=(20, 24, 28, 245), anchor="ma")
+            draw.text((width // 2, padding + 64), subtitle, font=sub_font, fill=t["text"], anchor="ma")
 
         card_x, card_y = padding, padding + header_h
         self._draw_gradient_panel(
             canvas,
             (card_x, card_y, card_x + card_w, card_y + content_h),
-            radius=24,
-            alpha=77,
-            outline=(255, 255, 255, 210),
-            width=3,
+            radius=t["radius_card"],
+            alpha=86,
+            outline=t["card_outline"],
+            width=2,
         )
 
         img_x = inner_x
@@ -1126,26 +1234,26 @@ class CatgirlService:
             self._draw_no_image(draw, img_x, img_y, image_w, image_h)
 
         y = img_y + image_h + image_text_gap
-        colors = [(255, 139, 24, 245), (214, 82, 152, 240), (55, 153, 211, 240), (74, 185, 118, 240)]
+        colors = [t["primary_alpha"], (*t["pink"], 240), (*t["accent"], 240), (*t["green"], 240)]
         prev_idx = None
         for idx, text in wrapped:
             if prev_idx is not None and idx != prev_idx:
                 y += paragraph_gap
             font = name_font if idx == 0 and cat else text_font
-            draw.text((inner_x, y), text, font=font, fill=colors[idx % len(colors)])
+            fill = t["text_dark"] if idx == 0 and cat else colors[idx % len(colors)]
+            draw.text((inner_x, y), text, font=font, fill=fill)
             y += line_h
             prev_idx = idx
 
         if footer_lines:
             fy = card_y + content_h - 42 - (len(footer_lines) - 1) * footer_line_h
             for footer_line in footer_lines:
-                draw.text((card_x + card_w // 2, fy), footer_line, font=small_font, fill=muted, anchor="ma")
+                draw.text((card_x + card_w // 2, fy), footer_line, font=small_font, fill=t["muted"], anchor="ma")
                 fy += footer_line_h
 
         safe_tag = re.sub(r"[^a-zA-Z0-9_-]", "_", str(tag or "showcase"))[:40] or "showcase"
         out = self.cache_dir / f"showcase_card_{safe_tag}_{int(time.time() * 1000)}.png"
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-        canvas.convert("RGB").save(out, "PNG")
+        save_scaled_image(canvas.convert("RGB"), out, "PNG", scale=self._output_image_scale())
         return out
 
     def draw_care_card(
@@ -1174,9 +1282,10 @@ class CatgirlService:
         panel_gap = 24
         image_w, image_h = 455, 635
         line_h = 34
-        title_font = self._font(48)
+        t = self.theme
+        title_font = self._title_font(48)
         sub_font = self._font(25)
-        name_font = self._font(35)
+        name_font = self._title_font(35)
         text_font = self._font(25)
         small_font = self._font(23)
         metric_font = self._font(25)
@@ -1213,23 +1322,19 @@ class CatgirlService:
         canvas = self._make_card_background((width, height)).convert("RGBA")
         draw = ImageDraw.Draw(canvas, "RGBA")
 
-        orange = (255, 139, 24)
-        dark = (18, 22, 26)
-        muted = (74, 82, 88)
-
-        draw.text((width // 2, padding + 6), title, font=title_font, fill=orange, anchor="ma")
+        draw.text((width // 2, padding + 6), title, font=title_font, fill=t["primary"], anchor="ma")
         if subtitle:
-            draw.text((width // 2, padding + 64), subtitle, font=sub_font, fill=(20, 24, 28, 245), anchor="ma")
+            draw.text((width // 2, padding + 64), subtitle, font=sub_font, fill=t["text"], anchor="ma")
 
         card_x, card_y = padding, padding + header_h
         card_h = content_h
         self._draw_gradient_panel(
             canvas,
             (card_x, card_y, card_x + card_w, card_y + card_h),
-            radius=24,
-            alpha=77,
-            outline=(255, 255, 255, 210),
-            width=3,
+            radius=t["radius_card"],
+            alpha=86,
+            outline=t["card_outline"],
+            width=2,
         )
 
         img_y = card_y + 32
@@ -1247,15 +1352,15 @@ class CatgirlService:
         left_y = img_y + image_h + 40
         if cat:
             for name_line in name_lines:
-                draw.text((img_x + 8, left_y), name_line, font=name_font, fill=dark)
+                draw.text((img_x + 8, left_y), name_line, font=name_font, fill=t["text_dark"])
                 left_y += 42
             left_y += 8
             left_colors = [
-                (255, 139, 24, 245),
-                (214, 82, 152, 240),
-                (55, 153, 211, 240),
-                (74, 185, 118, 240),
-                (135, 96, 219, 240),
+                t["primary_alpha"],
+                (*t["pink"], 240),
+                (*t["accent"], 240),
+                (*t["green"], 240),
+                (*t["purple"], 240),
             ]
             for idx, text in left_wrapped:
                 font = small_font if idx == 0 else text_font
@@ -1266,18 +1371,27 @@ class CatgirlService:
             y = card_y + 32
             for idx, (label, value) in enumerate(metrics):
                 colors = self._metric_palette(label, idx)
-                progress = 1.0 if label == "体重" else self._metric_progress(label, value, cat)
+                if label == "体重":
+                    progress = None
+                else:
+                    progress = self._metric_progress(label, value, cat)
                 value_font = self._fit_font(draw, value, 28, 112, min_size=21)
-                draw.text((text_x + 4, y), self._truncate_text(draw, label, metric_font, 112), font=metric_font, fill=dark)
-                draw.text((text_x + text_w - 4, y + 1), self._truncate_text(draw, value, value_font, 112), font=value_font, fill=colors[1], anchor="ra")
-                bar_y = y + 35
-                bar_margin = 4
-                self._draw_gradient_bar(
-                    canvas,
-                    (text_x + bar_margin, bar_y, text_x + text_w - bar_margin, bar_y + 24),
-                    colors,
-                    progress,
-                )
+                label_w_avail = 112
+                draw.text((text_x + 4, y), self._truncate_text(draw, label, metric_font, label_w_avail), font=metric_font, fill=t["text"])
+                if progress is None:
+                    # 无固定上限的数据（余额/体重/宝石/亲密等级/档位等）：纯数值徽章，垂直居中，不画进度条
+                    draw.text((text_x + text_w - 4, y + 18), self._truncate_text(draw, value, value_font, 112), font=value_font, fill=colors[1], anchor="ra")
+                else:
+                    draw.text((text_x + text_w - 4, y + 1), self._truncate_text(draw, value, value_font, 112), font=value_font, fill=colors[1], anchor="ra")
+                    # 细条：高度从 24 降到 12，更精致；与数值之间留 6px 呼吸
+                    bar_y = y + 36
+                    bar_margin = 4
+                    self._draw_gradient_bar(
+                        canvas,
+                        (text_x + bar_margin, bar_y, text_x + text_w - bar_margin, bar_y + 12),
+                        colors,
+                        progress,
+                    )
                 y += metric_h + metric_gap
         else:
             y = card_y + 32
@@ -1292,31 +1406,30 @@ class CatgirlService:
             self._draw_round_panel(
                 canvas,
                 (box_x1, box_y1, box_x2, box_y2),
-                radius=18,
-                fill=(255, 255, 255, 218),
-                outline=(255, 255, 255, 235),
+                radius=t["radius_panel"],
+                fill=t["panel_fill"],
+                outline=t["panel_outline"],
                 width=2,
-                shadow=False,
+                shadow=True,
             )
             value_font = self._fit_font(draw, value, 29, text_w - 58, min_size=19)
-            draw.text((box_x1 + 16, box_y1 + 24), label, font=self._font(27), fill=orange, anchor="lm")
+            draw.text((box_x1 + 16, box_y1 + 24), label, font=self._font(27), fill=t["primary"], anchor="lm")
             icon_x = box_x1 + 30
             value_y = box_y1 + 66
             self._draw_diamond_icon(draw, icon_x, value_y, 26)
-            draw.text((box_x2 - 12, value_y + 1), value, font=value_font, fill=orange, anchor="rm")
+            draw.text((box_x2 - 12, value_y + 1), value, font=value_font, fill=t["primary"], anchor="rm")
             y = box_y2
 
         if footer:
             footer_lines = self._wrap_by_width(draw, footer, small_font, card_w - 64, 2)
             fy = card_y + card_h - 34 - (len(footer_lines) - 1) * 30
             for footer_line in footer_lines:
-                draw.text((card_x + card_w // 2, fy), footer_line, font=small_font, fill=muted, anchor="ma")
+                draw.text((card_x + card_w // 2, fy), footer_line, font=small_font, fill=t["muted"], anchor="ma")
                 fy += 30
 
         safe_tag = re.sub(r"[^a-zA-Z0-9_-]", "_", str(tag or "care"))[:40] or "care"
         out = self.cache_dir / f"cat_card_{safe_tag}_{int(time.time() * 1000)}.png"
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-        canvas.convert("RGB").save(out, "PNG")
+        save_scaled_image(canvas.convert("RGB"), out, "PNG", scale=self._output_image_scale())
         return out
 
     def draw_info_card(
@@ -1330,13 +1443,14 @@ class CatgirlService:
     ) -> Path:
         lines = [str(x) for x in (lines or []) if str(x).strip()]
         metrics = [(str(k), str(v)) for k, v in (metrics or [])]
+        t = self.theme
         width = 980
         padding = 42
         header_h = 112
         card_w = width - padding * 2
         inner_x = padding + 30
         inner_w = card_w - 60
-        title_font = self._font(48)
+        title_font = self._title_font(48)
         sub_font = self._font(26)
         text_font = self._font(25)
         small_font = self._font(22)
@@ -1359,20 +1473,23 @@ class CatgirlService:
         content_h = 32 + metrics_h + gap_after_metrics + text_h + footer_h + 32
         height = padding + header_h + content_h + padding
 
-        canvas = Image.new("RGB", (width, height), "white")
-        draw = ImageDraw.Draw(canvas)
-        orange = (255, 140, 0)
-        blue = (0, 191, 255)
-        dark = (40, 40, 40)
-        muted = (90, 90, 90)
-        soft = (246, 250, 255)
+        canvas = self._make_card_background((width, height)).convert("RGBA")
+        draw = ImageDraw.Draw(canvas, "RGBA")
 
-        draw.text((width // 2, padding + 18), title, font=title_font, fill=orange, anchor="ma")
+        draw.text((width // 2, padding + 18), title, font=title_font, fill=t["primary"], anchor="ma")
         if subtitle:
-            draw.text((width // 2, padding + 76), subtitle, font=sub_font, fill=muted, anchor="ma")
+            draw.text((width // 2, padding + 76), subtitle, font=sub_font, fill=t["muted"], anchor="ma")
 
         card_x, card_y = padding, padding + header_h
-        draw.rounded_rectangle((card_x, card_y, card_x + card_w, card_y + content_h), radius=18, outline=blue, width=5, fill=(255, 255, 255))
+        # info 卡现在也用渐变底 + 浅白描边，和其它卡统一视觉语言
+        self._draw_gradient_panel(
+            canvas,
+            (card_x, card_y, card_x + card_w, card_y + content_h),
+            radius=t["radius_card"],
+            alpha=96,
+            outline=t["card_outline"],
+            width=2,
+        )
 
         y = card_y + 32
         if metrics:
@@ -1383,28 +1500,36 @@ class CatgirlService:
                 x = inner_x + col * (cell_w + 16)
                 yy = y + row * (cell_h + cell_gap)
                 mid_y = yy + cell_h // 2
-                label_w = min(int(cell_w * 0.44), max(70, self._text_size(draw, label, metric_font)[0] + 6))
-                value_w = max(60, cell_w - label_w - 42)
+                # 不再按 44% 硬切：label 左对齐，value 右对齐，给数值留更宽的呼吸空间
+                label_w = min(int(cell_w * 0.46), max(70, self._text_size(draw, label, metric_font)[0] + 8))
+                value_w = max(60, cell_w - label_w - 28)
                 value_font = self._fit_font(draw, value, 29, value_w)
-                draw.rounded_rectangle((x, yy, x + cell_w, yy + cell_h), radius=10, fill=soft, outline=(220, 238, 248), width=2)
-                draw.text((x + 14, mid_y), self._truncate_text(draw, label, metric_font, label_w), font=metric_font, fill=muted, anchor="lm")
-                draw.text((x + cell_w - 14, mid_y), self._truncate_text(draw, value, value_font, value_w), font=value_font, fill=orange, anchor="rm")
+                self._draw_round_panel(
+                    canvas,
+                    (x, yy, x + cell_w, yy + cell_h),
+                    radius=t["radius_cell"],
+                    fill=t["panel_fill"],
+                    outline=t["panel_outline"],
+                    width=1,
+                    shadow=False,
+                )
+                draw.text((x + 14, mid_y), self._truncate_text(draw, label, metric_font, label_w), font=metric_font, fill=t["muted"], anchor="lm")
+                draw.text((x + cell_w - 14, mid_y), self._truncate_text(draw, value, value_font, value_w), font=value_font, fill=t["primary"], anchor="rm")
             y += metrics_h + gap_after_metrics
 
         for wrapped in wrapped_lines:
-            draw.text((inner_x, y), wrapped, font=text_font, fill=dark)
+            draw.text((inner_x, y), wrapped, font=text_font, fill=t["text"])
             y += line_h
 
         if footer_lines:
             y += 16
             for footer_line in footer_lines:
-                draw.text((inner_x, y), footer_line, font=small_font, fill=muted)
+                draw.text((inner_x, y), footer_line, font=small_font, fill=t["muted"])
                 y += 28
 
         safe_tag = re.sub(r"[^a-zA-Z0-9_-]", "_", str(tag or "info"))[:40] or "info"
         out = self.cache_dir / f"info_card_{safe_tag}_{int(time.time() * 1000)}.png"
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-        canvas.save(out, "PNG")
+        save_scaled_image(canvas.convert("RGB"), out, "PNG", scale=self._output_image_scale())
         return out
 
     def draw_section_card(
@@ -1418,6 +1543,7 @@ class CatgirlService:
     ) -> Path:
         sections = sections or []
         metrics = [(str(k), str(v)) for k, v in (metrics or [])]
+        t = self.theme
         width = 980
         padding = 42
         header_h = 112
@@ -1428,9 +1554,9 @@ class CatgirlService:
         section_gap = 18
         section_w = (inner_w - col_gap) // 2
 
-        title_font = self._font(48)
+        title_font = self._title_font(48)
         sub_font = self._font(26)
-        section_font = self._font(27)
+        section_font = self._title_font(27)
         command_font = self._font(22)
         desc_font = self._font(21)
         small_font = self._font(22)
@@ -1490,24 +1616,21 @@ class CatgirlService:
 
         canvas = self._make_card_background((width, height)).convert("RGBA")
         draw = ImageDraw.Draw(canvas, "RGBA")
-        orange = (255, 140, 0)
-        dark = (40, 40, 40)
-        muted = (90, 90, 90)
-        soft = (255, 255, 255, 132)
-        line = (255, 255, 255, 205)
+        soft = t["panel_fill"]
+        line = t["panel_outline"]
 
-        draw.text((width // 2, padding + 18), title, font=title_font, fill=orange, anchor="ma")
+        draw.text((width // 2, padding + 18), title, font=title_font, fill=t["primary"], anchor="ma")
         if subtitle:
-            draw.text((width // 2, padding + 76), subtitle, font=sub_font, fill=muted, anchor="ma")
+            draw.text((width // 2, padding + 76), subtitle, font=sub_font, fill=t["muted"], anchor="ma")
 
         card_x, card_y = padding, padding + header_h
         self._draw_gradient_panel(
             canvas,
             (card_x, card_y, card_x + card_w, card_y + content_h),
-            radius=22,
+            radius=t["radius_card"],
             alpha=88,
-            outline=(255, 255, 255, 215),
-            width=3,
+            outline=t["card_outline"],
+            width=2,
         )
         y = card_y + 32
 
@@ -1519,12 +1642,20 @@ class CatgirlService:
                 x = inner_x + col * (metric_cell_w + 16)
                 yy = y + row * (cell_h + cell_gap)
                 mid_y = yy + cell_h // 2
-                label_w = min(int(metric_cell_w * 0.44), max(70, self._text_size(draw, label, metric_font)[0] + 6))
-                value_w = max(60, metric_cell_w - label_w - 42)
+                label_w = min(int(metric_cell_w * 0.46), max(70, self._text_size(draw, label, metric_font)[0] + 8))
+                value_w = max(60, metric_cell_w - label_w - 28)
                 value_font = self._fit_font(draw, value, 29, value_w)
-                draw.rounded_rectangle((x, yy, x + metric_cell_w, yy + cell_h), radius=10, fill=soft, outline=line, width=2)
-                draw.text((x + 14, mid_y), self._truncate_text(draw, label, metric_font, label_w), font=metric_font, fill=muted, anchor="lm")
-                draw.text((x + metric_cell_w - 14, mid_y), self._truncate_text(draw, value, value_font, value_w), font=value_font, fill=orange, anchor="rm")
+                self._draw_round_panel(
+                    canvas,
+                    (x, yy, x + metric_cell_w, yy + cell_h),
+                    radius=t["radius_cell"],
+                    fill=soft,
+                    outline=line,
+                    width=1,
+                    shadow=False,
+                )
+                draw.text((x + 14, mid_y), self._truncate_text(draw, label, metric_font, label_w), font=metric_font, fill=t["muted"], anchor="lm")
+                draw.text((x + metric_cell_w - 14, mid_y), self._truncate_text(draw, value, value_font, value_w), font=value_font, fill=t["primary"], anchor="rm")
             y += metrics_h + top_gap
 
         for idx, (section_title, rows) in enumerate(normalized_sections):
@@ -1534,31 +1665,30 @@ class CatgirlService:
             self._draw_gradient_panel(
                 canvas,
                 (x, yy, x + section_w, yy + section_h),
-                radius=14,
+                radius=t["radius_panel"],
                 alpha=98,
                 outline=line,
                 width=2,
             )
-            draw.text((x + 16, yy + 24), section_title, font=section_font, fill=orange, anchor="lm")
-            draw.line((x + 14, yy + 44, x + section_w - 14, yy + 44), fill=(255, 255, 255, 170), width=2)
+            draw.text((x + 16, yy + 24), section_title, font=section_font, fill=t["primary"], anchor="lm")
+            draw.line((x + 14, yy + 44, x + section_w - 14, yy + 44), fill=t["panel_outline"], width=1)
             row_y = yy + 54
             text_w = section_w - 32
             for command, desc in rows:
                 fitted_command_font = self._fit_font(draw, command, 22, text_w, min_size=18)
-                draw.text((x + 16, row_y + 17), self._truncate_text(draw, command, fitted_command_font, text_w), font=fitted_command_font, fill=dark, anchor="lm")
-                draw.text((x + 16, row_y + 42), self._truncate_text(draw, desc, desc_font, text_w), font=desc_font, fill=muted, anchor="lm")
+                draw.text((x + 16, row_y + 17), self._truncate_text(draw, command, fitted_command_font, text_w), font=fitted_command_font, fill=t["text"], anchor="lm")
+                draw.text((x + 16, row_y + 42), self._truncate_text(draw, desc, desc_font, text_w), font=desc_font, fill=t["muted"], anchor="lm")
                 row_y += row_h
 
         if footer_lines:
             fy = card_y + content_h - 34 - (len(footer_lines) - 1) * 28
             for footer_line in footer_lines:
-                draw.text((card_x + card_w // 2, fy), footer_line, font=small_font, fill=muted, anchor="ma")
+                draw.text((card_x + card_w // 2, fy), footer_line, font=small_font, fill=t["muted"], anchor="ma")
                 fy += 28
 
         safe_tag = re.sub(r"[^a-zA-Z0-9_-]", "_", str(tag or "sections"))[:40] or "sections"
         out = self.cache_dir / f"section_card_{safe_tag}_{int(time.time() * 1000)}.png"
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-        canvas.convert("RGB").save(out, "PNG")
+        save_scaled_image(canvas.convert("RGB"), out, "PNG", scale=self._output_image_scale())
         return out
 
     def draw_table_card(
@@ -1575,13 +1705,14 @@ class CatgirlService:
         headers = [str(x) for x in (headers or [])]
         rows = [[str(cell) for cell in row] for row in (rows or [])]
         metrics = [(str(k), str(v)) for k, v in (metrics or [])]
+        t = self.theme
         width = 980
         padding = 42
         header_h = 112
         card_w = width - padding * 2
         inner_x = padding + 30
         inner_w = card_w - 60
-        title_font = self._font(48)
+        title_font = self._title_font(48)
         sub_font = self._font(26)
         table_font = self._font(21)
         header_font = self._font(22)
@@ -1643,26 +1774,23 @@ class CatgirlService:
 
         canvas = self._make_card_background((width, height)).convert("RGBA")
         draw = ImageDraw.Draw(canvas, "RGBA")
-        orange = (255, 140, 0)
-        dark = (40, 40, 40)
-        muted = (90, 90, 90)
-        soft = (255, 255, 255, 142)
-        line = (255, 255, 255, 205)
-        row_fill_a = (255, 249, 238, 168)
-        row_fill_b = (255, 238, 230, 148)
+        soft = t["panel_fill"]
+        line = t["panel_outline"]
+        row_fill_a = t["row_a"]
+        row_fill_b = t["row_b"]
 
-        draw.text((width // 2, padding + 18), title, font=title_font, fill=orange, anchor="ma")
+        draw.text((width // 2, padding + 18), title, font=title_font, fill=t["primary"], anchor="ma")
         if subtitle:
-            draw.text((width // 2, padding + 76), subtitle, font=sub_font, fill=muted, anchor="ma")
+            draw.text((width // 2, padding + 76), subtitle, font=sub_font, fill=t["muted"], anchor="ma")
 
         card_x, card_y = padding, padding + header_h
         self._draw_gradient_panel(
             canvas,
             (card_x, card_y, card_x + card_w, card_y + content_h),
-            radius=22,
+            radius=t["radius_card"],
             alpha=88,
-            outline=(255, 255, 255, 215),
-            width=3,
+            outline=t["card_outline"],
+            width=2,
         )
         y = card_y + 32
 
@@ -1674,20 +1802,28 @@ class CatgirlService:
                 x = inner_x + col * (metric_cell_w + 16)
                 yy = y + row * (cell_h + cell_gap)
                 mid_y = yy + cell_h // 2
-                label_w = min(int(metric_cell_w * 0.44), max(70, self._text_size(draw, label, metric_font)[0] + 6))
-                value_w = max(60, metric_cell_w - label_w - 42)
+                label_w = min(int(metric_cell_w * 0.46), max(70, self._text_size(draw, label, metric_font)[0] + 8))
+                value_w = max(60, metric_cell_w - label_w - 28)
                 value_font = self._fit_font(draw, value, 29, value_w)
-                draw.rounded_rectangle((x, yy, x + metric_cell_w, yy + cell_h), radius=10, fill=soft, outline=line, width=2)
-                draw.text((x + 14, mid_y), self._truncate_text(draw, label, metric_font, label_w), font=metric_font, fill=muted, anchor="lm")
-                draw.text((x + metric_cell_w - 14, mid_y), self._truncate_text(draw, value, value_font, value_w), font=value_font, fill=orange, anchor="rm")
+                self._draw_round_panel(
+                    canvas,
+                    (x, yy, x + metric_cell_w, yy + cell_h),
+                    radius=t["radius_cell"],
+                    fill=soft,
+                    outline=line,
+                    width=1,
+                    shadow=False,
+                )
+                draw.text((x + 14, mid_y), self._truncate_text(draw, label, metric_font, label_w), font=metric_font, fill=t["muted"], anchor="lm")
+                draw.text((x + metric_cell_w - 14, mid_y), self._truncate_text(draw, value, value_font, value_w), font=value_font, fill=t["primary"], anchor="rm")
             y += metrics_h + top_gap
 
         x = inner_x
         if headers:
-            draw.rounded_rectangle((inner_x, y, inner_x + inner_w, y + header_row_h), radius=10, fill=(255, 245, 224, 190), outline=line, width=2)
+            draw.rounded_rectangle((inner_x, y, inner_x + inner_w, y + header_row_h), radius=t["radius_cell"], fill=(255, 246, 234, 195), outline=line, width=1)
             cx = inner_x
             for idx, header in enumerate(headers[:col_count]):
-                draw.text((cx + 10, y + header_row_h // 2), self._truncate_text(draw, header, header_font, widths[idx] - 20), font=header_font, fill=orange, anchor="lm")
+                draw.text((cx + 10, y + header_row_h // 2), self._truncate_text(draw, header, header_font, widths[idx] - 20), font=header_font, fill=t["primary"], anchor="lm")
                 cx += widths[idx]
             y += header_row_h
 
@@ -1695,10 +1831,10 @@ class CatgirlService:
             current_row_h = row_heights[row_idx]
             fill = row_fill_a if row_idx % 2 == 0 else row_fill_b
             draw.rounded_rectangle((inner_x, y + 2, inner_x + inner_w, y + current_row_h - 2), radius=8, fill=fill)
-            draw.line((inner_x + 8, y + current_row_h, inner_x + inner_w - 8, y + current_row_h), fill=(255, 255, 255, 132), width=1)
+            draw.line((inner_x + 8, y + current_row_h, inner_x + inner_w - 8, y + current_row_h), fill=t["panel_outline"], width=1)
             cx = inner_x
             for idx in range(col_count):
-                color = dark if idx == 0 else muted
+                color = t["text"] if idx == 0 else t["muted"]
                 cell_lines = wrapped_rows[row_idx][idx]
                 text_block_h = len(cell_lines) * table_line_h
                 line_y = y + max(8, (current_row_h - text_block_h) // 2 + 2)
@@ -1711,13 +1847,12 @@ class CatgirlService:
         if footer_lines:
             fy = card_y + content_h - 34 - (len(footer_lines) - 1) * 28
             for footer_line in footer_lines:
-                draw.text((card_x + card_w // 2, fy), footer_line, font=small_font, fill=muted, anchor="ma")
+                draw.text((card_x + card_w // 2, fy), footer_line, font=small_font, fill=t["muted"], anchor="ma")
                 fy += 28
 
         safe_tag = re.sub(r"[^a-zA-Z0-9_-]", "_", str(tag or "table"))[:40] or "table"
         out = self.cache_dir / f"table_card_{safe_tag}_{int(time.time() * 1000)}.png"
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-        canvas.convert("RGB").save(out, "PNG")
+        save_scaled_image(canvas.convert("RGB"), out, "PNG", scale=self._output_image_scale())
         return out
 
     def status(self, uid: str) -> Tuple[bool, str, Optional[Path]]:
@@ -1743,19 +1878,36 @@ class CatgirlService:
                 work_line = f"\n打工中：{pending_work.get('job', '打工')}，剩余 {self._format_duration(remain)}"
             else:
                 work_line = f"\n打工中：{pending_work.get('job', '打工')} 已完成，发送「猫娘打工」领取报酬"
+        wish_brief = self._daily_wish_status_brief(uid)
+        wish_lines = [str(line).strip() for line in wish_brief.get("lines", []) if str(line).strip()]
+        wish_metric = wish_brief.get("metric")
+        if not (isinstance(wish_metric, (list, tuple)) and len(wish_metric) == 2):
+            wish_metric = None
         satiety_zero_line, runaway_line = self._satiety_risk_lines(cat)
         detail_lines = [
             satiety_zero_line,
             runaway_line,
-            self._health_trend_line(cat),
-            self._energy_status_line(cat),
-            self._interaction_status_line(cat),
             next_line,
         ]
         detail_lines = [line for line in detail_lines if line]
-        card_status_lines = [work_line.strip() if work_line else "", *detail_lines]
+        card_status_lines = [work_line.strip() if work_line else "", *wish_lines, *detail_lines]
         card_status_lines = [line for line in card_status_lines if line]
-        detail_text = "\n".join(detail_lines)
+        detail_text = "\n".join([*wish_lines, *detail_lines])
+        metrics = [
+            ("亲密等级", self._intimacy_display(cat)),
+            ("成长进度", self._growth_display(cat)),
+        ]
+        if wish_metric:
+            metrics.append((str(wish_metric[0]), str(wish_metric[1])))
+        metrics.extend([
+            ("饱食度", self._fmt_int(cat.get("satiety", 0))),
+            ("心情", self._fmt_int(cat.get("mood", 0))),
+            ("健康", self._fmt_int(cat.get("health", 0))),
+            ("精力", self._fmt_int(cat.get("energy", 0))),
+            ("体重", self._weight_display(cat)),
+            ("体型", cat.get("body_type", "匀称")),
+            (self._coin_name(), f"{self.economy.get_balance(uid)} {self._coin_name()}"),
+        ])
         msg = (
             f"猫娘「{cat['name']}」的成长档案已更新～\n\n"
             f"性格：{cat.get('personality', '温柔')}\n"
@@ -1777,24 +1929,14 @@ class CatgirlService:
             "猫娘成长档案",
             cat,
             subtitle=f"相伴 {companion_days(cat)} 天",
-            lines=[stage_description(stage), *card_status_lines],
-            metrics=[
-                ("亲密等级", self._intimacy_display(cat)),
-                ("成长进度", self._growth_display(cat)),
-                ("饱食度", self._fmt_int(cat.get("satiety", 0))),
-                ("心情", self._fmt_int(cat.get("mood", 0))),
-                ("健康", self._fmt_int(cat.get("health", 0))),
-                ("精力", self._fmt_int(cat.get("energy", 0))),
-                ("体重", self._weight_display(cat)),
-                ("体型", cat.get("body_type", "匀称")),
-                (self._coin_name(), f"{self.economy.get_balance(uid)} {self._coin_name()}"),
-            ],
+            lines=card_status_lines,
+            metrics=metrics,
             footer=f"状态：{status_tag(cat)}",
             tag=f"status_{uid}",
         )
         return True, msg, card
 
-    def _random_food(self):
+    def _food_options(self):
         foods = []
         for item in self._feed_rules().get("foods", []):
             if not isinstance(item, dict) or not item.get("enabled", True):
@@ -1806,8 +1948,27 @@ class CatgirlService:
             foods.append((name, low, high, verb))
         if not foods:
             foods = [("草莓奶油蛋糕", 32, 58, "吃")]
+        return foods
+
+    def _random_food(self):
+        foods = self._food_options()
         name, low, high, verb = random.choice(foods)
         return name, random.randint(low, high), verb
+
+    def _find_food(self, query: str):
+        query = str(query or "").strip()
+        if not query:
+            return self._random_food(), []
+        foods = self._food_options()
+        normalized = query.lower()
+        for name, low, high, verb in foods:
+            if normalized == name.lower():
+                return (name, random.randint(low, high), verb), []
+        matches = [(name, low, high, verb) for name, low, high, verb in foods if normalized in name.lower()]
+        if len(matches) == 1:
+            name, low, high, verb = matches[0]
+            return (name, random.randint(low, high), verb), []
+        return None, matches
 
     def _work_jobs(self, work_rules: Optional[Dict] = None) -> list[Dict]:
         work_rules = work_rules or self._rules("work")
@@ -2005,16 +2166,25 @@ class CatgirlService:
             bag[item_id] = count - 1
         return True
 
-    def feed(self, uid: str) -> Tuple[bool, str, Optional[Path]]:
+    def feed(self, uid: str, food_query: str = "") -> Tuple[bool, str, Optional[Path], Dict[str, Any]]:
         cat = self._get(uid)
         if not cat or not cat.get("name"):
-            return False, self.missing_cat_message(uid), None
+            return False, self.missing_cat_message(uid), None, {}
 
         today = today_str()
         care_rules = self._care_rules()
         feed_rules = self._feed_rules()
         coin_name = self._coin_name()
-        food, cost, verb = self._random_food()
+        selected_food, food_matches = self._find_food(food_query)
+        if not selected_food:
+            if food_matches:
+                names = "、".join(name for name, *_ in food_matches[:8])
+                msg = f"找到多个相近的食物：{names}\n请发送更完整的食物名。"
+            else:
+                names = "、".join(name for name, *_ in self._food_options()[:12])
+                msg = f"没有找到「{str(food_query or '').strip()}」这个食物。\n可选食物：{names}"
+            return False, msg, None, {}
+        food, cost, verb = selected_food
 
         def op(root):
             wallet = root.setdefault("wallet", {})
@@ -2051,19 +2221,41 @@ class CatgirlService:
             current_cat.pop("no_feed_weight_decay_periods", None)
             stats = current_cat.setdefault("care_stats", {})
             stats["total_feeds"] = int(stats.get("total_feeds", 0)) + 1
-            current_cat, stage_msg = self._advance_stage(current_cat)
-
             wallet[uid] = balance - cost
+
+            # Step 5：喂食锚点的性格专属随机事件
+            event_text = ""
+            if self.events is not None:
+                uid_key = str(current_cat.get("user", uid))
+                today_count_ev = self.events.today_anchor_count(self.store, uid_key, today, "feed")
+                triggered_ids = self.events.today_triggered_ids(self.store, uid_key, today)
+                try:
+                    event_roll = self.events.roll("feed", current_cat, today_count_ev, triggered_ids)
+                except Exception:
+                    event_roll = None
+                if event_roll is not None:
+                    ev, deltas = event_roll
+                    coin_delta = int(deltas.get("coin", 0) or 0)
+                    if coin_delta:
+                        wallet[uid_key] = int(wallet.get(uid_key, 0)) + coin_delta
+                    current_cat["mood"] = round(clamp(float(current_cat.get("mood", 80)) + int(deltas.get("mood", 0) or 0), 0, 100), 4)
+                    current_cat["energy"] = round(clamp(float(current_cat.get("energy", 80)) + int(deltas.get("energy", 0) or 0), 0, 100), 4)
+                    current_cat["intimacy"] = int(current_cat.get("intimacy", 0)) + int(deltas.get("intimacy", 0) or 0)
+                    current_cat["growth"] = int(current_cat.get("growth", 0)) + int(deltas.get("growth", 0) or 0)
+                    event_text = str(ev.get("text", "") or "")
+                    self.events.record_event(root, uid_key, today, "feed", str(ev.get("id", "") or ""), event_text)
+
+            current_cat, stage_msg = self._advance_stage(current_cat)
             root.setdefault("catgirls", {})[uid] = current_cat
-            return True, "", current_cat, satiety_add, mood_add, health_add, energy_add, growth_add, wallet[uid], stage_msg, intimacy_add, weight_gain, health_multiplier, health_label
+            return True, "", current_cat, satiety_add, mood_add, health_add, energy_add, growth_add, wallet[uid], stage_msg, intimacy_add, weight_gain, health_multiplier, health_label, event_text
 
         result = self.store.update(op)
         ok = result[0]
         if not ok:
             _, msg, current_cat, *_ = result
-            return False, msg, None
+            return False, msg, None, {"food": food, "verb": verb}
 
-        _, _, cat, satiety_add, mood_add, health_add, energy_add, growth_add, balance, stage_msg, intimacy_add, weight_gain, health_multiplier, health_label = result
+        _, _, cat, satiety_add, mood_add, health_add, energy_add, growth_add, balance, stage_msg, intimacy_add, weight_gain, health_multiplier, health_label, event_text = result
         weight_delta_display = self._fmt_delta(weight_gain)
         weight_line = f"\n体重变化：{weight_delta_display} 斤" if abs(float(weight_gain or 0)) >= 0.05 else ""
         feed_effect_line = ""
@@ -2084,6 +2276,8 @@ class CatgirlService:
         )
         if stage_msg:
             msg += stage_msg
+        if event_text:
+            msg += f"\n✦ 今日奇遇：{event_text}"
         card = self.draw_care_card(
             "喂猫结果",
             cat,
@@ -2091,7 +2285,7 @@ class CatgirlService:
             lines=[
                 "她幸福地眯起眼睛，看起来超级满足～",
                 f"喂食效率：{self._fmt_percent(float(health_multiplier) * 100)}（健康{health_label}）" if float(health_multiplier or 1) < 0.999 else "",
-                stage_msg.strip() if stage_msg else "",
+                f"今日奇遇：{event_text}" if event_text else "",
             ],
             metrics=[
                 ("饱食度", self._fmt_delta(satiety_add)),
@@ -2107,7 +2301,7 @@ class CatgirlService:
             footer=f"当前阶段：{stage_name(cat.get('stage', 0))}",
             tag=f"feed_{uid}",
         )
-        return True, msg, card
+        return True, msg, card, {"food": food, "verb": verb}
 
     def work(self, uid: str, job_query: str = ""):
         self._finalize_expired_adoption(uid)
@@ -2153,19 +2347,64 @@ class CatgirlService:
             return True, msg, card
         selected_job, job_matches = self._find_work_job(jobs, job_query)
 
-        def finish_work(cat: Dict, pending: Dict, wallet: Dict):
+        def finish_work(cat: Dict, pending: Dict, wallet: Dict, root: Dict, uid_key: str, today: str):
             job_name = pending.get("job", "打工")
             reward = int(pending.get("reward", 0))
             growth_add = int(pending.get("growth_add", 0))
             intimacy_add = int(pending.get("intimacy_add", 0))
-            uid_key = str(cat.get("user", uid))
+
+            # Step 4：打工风险结算（80/15/5 分布）
+            work_mode = "normal"
+            work_bonus_msg = ""
+            if self.events is not None:
+                try:
+                    work_mode, wf_payload = self.events.roll_work_finish()
+                except Exception:
+                    work_mode, wf_payload = "normal", {"coin_multiplier": 1.0, "mood": 0, "intimacy": 0, "growth": 0, "text": ""}
+                if work_mode != "normal":
+                    multiplier = float(wf_payload.get("coin_multiplier", 1.0) or 1.0)
+                    reward = max(1, int(reward * multiplier))
+                    mood_delta = int(wf_payload.get("mood", 0) or 0)
+                    intimacy_add = intimacy_add + int(wf_payload.get("intimacy", 0) or 0)
+                    growth_add = growth_add + int(wf_payload.get("growth", 0) or 0)
+                    wf_text = str(wf_payload.get("text", "") or "").strip()
+                    if wf_text:
+                        work_bonus_msg = f"\n✦ {wf_text}"
+
             wallet[uid_key] = int(wallet.get(uid_key, 0)) + reward
             cat["growth"] = int(cat.get("growth", 0)) + growth_add
             cat["intimacy"] = int(cat.get("intimacy", 0)) + intimacy_add
-            cat["mood"] = round(clamp(float(cat.get("mood", 80)) + float(pending.get("mood_reward", 1)), 0, 100), 4)
+            base_mood_reward = float(pending.get("mood_reward", 1))
+            if work_mode == "accident":
+                base_mood_reward = base_mood_reward + int(wf_payload.get("mood", -10) or 0)
+            cat["mood"] = round(clamp(float(cat.get("mood", 80)) + base_mood_reward, 0, 100), 4)
             stats = cat.setdefault("care_stats", {})
             stats["total_works"] = int(stats.get("total_works", 0)) + 1
             cat.pop("pending_work", None)
+
+            # Step 2：猫娘打工完成锚点的随机事件（独立于风险结算，叠加额外 delta）
+            event_text = ""
+            event_deltas = {"coin": 0, "mood": 0, "energy": 0, "intimacy": 0, "growth": 0}
+            if self.events is not None:
+                today_count = self.events.today_anchor_count(self.store, uid_key, today, "cat_work_finish")
+                triggered_ids = self.events.today_triggered_ids(self.store, uid_key, today)
+                try:
+                    event_roll = self.events.roll("cat_work_finish", cat, today_count, triggered_ids)
+                except Exception:
+                    event_roll = None
+                if event_roll is not None:
+                    ev, deltas = event_roll
+                    event_deltas = {k: int(v or 0) for k, v in deltas.items()}
+                    coin_delta = int(event_deltas.get("coin", 0) or 0)
+                    if coin_delta:
+                        wallet[uid_key] = int(wallet.get(uid_key, 0)) + coin_delta
+                    cat["mood"] = round(clamp(float(cat.get("mood", 80)) + int(event_deltas.get("mood", 0) or 0), 0, 100), 4)
+                    cat["energy"] = round(clamp(float(cat.get("energy", 80)) + int(event_deltas.get("energy", 0) or 0), 0, 100), 4)
+                    cat["intimacy"] = int(cat.get("intimacy", 0)) + int(event_deltas.get("intimacy", 0) or 0)
+                    cat["growth"] = int(cat.get("growth", 0)) + int(event_deltas.get("growth", 0) or 0)
+                    event_text = str(ev.get("text", "") or "")
+                    self.events.record_event(root, uid_key, today, "cat_work_finish", str(ev.get("id", "") or ""), event_text)
+
             cat, stage_msg = self._advance_stage(cat)
             msg = (
                 f"「{cat['name']}」完成了{job_name}，抱着小钱包跑回来啦～\n"
@@ -2176,6 +2415,10 @@ class CatgirlService:
             )
             if stage_msg:
                 msg += stage_msg
+            if work_bonus_msg:
+                msg += work_bonus_msg
+            if event_text:
+                msg += f"\n✦ 今日奇遇：{event_text}"
             return msg, {
                 "job_name": job_name,
                 "reward": reward,
@@ -2183,6 +2426,9 @@ class CatgirlService:
                 "intimacy_add": intimacy_add,
                 "balance": wallet[uid_key],
                 "stage_msg": stage_msg,
+                "work_mode": work_mode,
+                "event_text": event_text,
+                "event_deltas": event_deltas,
             }
 
         def op(root):
@@ -2205,7 +2451,7 @@ class CatgirlService:
                         "growth_add": int(pending.get("growth_add", 0)),
                         "intimacy_add": int(pending.get("intimacy_add", 0)),
                     }
-                msg, detail = finish_work(cat, pending, wallet)
+                msg, detail = finish_work(cat, pending, wallet, root, str(cat.get("user", uid)), today_str())
                 cats[uid] = cat
                 return True, msg, cat, "finished", detail
 
@@ -2330,7 +2576,7 @@ class CatgirlService:
                 footer="发送「请赐我一只可爱猫娘吧」获取猫娘后再打工。",
                 tag=f"work_err_{uid}",
             )
-            return ok, msg, card
+            return ok, msg, card, event_type
         if event_type == "finished":
             metrics = [
                 ("获得", f"{detail.get('reward', 0)} {coin_name}"),
@@ -2338,9 +2584,10 @@ class CatgirlService:
                 ("亲密度", self._fmt_delta(detail.get("intimacy_add", 0))),
                 ("余额", f"{detail.get('balance', 0)} {coin_name}"),
             ]
-            lines = [f"完成了{detail.get('job_name', '打工')}，抱着小钱包跑回来啦～"]
-            if detail.get("stage_msg"):
-                lines.append(str(detail.get("stage_msg")).strip())
+            if str(detail.get("work_mode", "normal")) != "normal":
+                metrics.append(("结算", str(detail.get("work_mode", ""))))
+            card_msg = str(msg or "").replace(str(detail.get("stage_msg", "") or ""), "").strip()
+            lines = [card_msg] if card_msg else [f"完成了{detail.get('job_name', '打工')}，抱着小钱包跑回来啦～"]
             title = "打工结果"
         elif event_type == "started":
             metrics = [
@@ -2367,7 +2614,7 @@ class CatgirlService:
                 ("成长值", self._fmt_delta(detail.get("growth_add", 0))),
                 ("亲密度", self._fmt_delta(detail.get("intimacy_add", 0))),
             ]
-            lines = [f"正在{detail.get('job_name', '打工')}，还需要一点时间。"]
+            lines = [msg if msg else f"正在{detail.get('job_name', '打工')}，还需要一点时间。"]
             title = "打工结果"
         else:
             metrics = [
@@ -2388,7 +2635,7 @@ class CatgirlService:
             footer="发送「猫娘打工 列表」查看地点；发送「猫娘状态」查看完整档案。",
             tag=f"work_{uid}",
         )
-        return ok, msg, card
+        return ok, msg, card, event_type, detail or {}
 
     def work_unlock(self, uid: str, job_query: str = ""):
         self._finalize_expired_adoption(uid)
@@ -2582,21 +2829,43 @@ class CatgirlService:
             cat["buffs"] = buffs
             stats = cat.setdefault("care_stats", {})
             stats["total_interacts"] = int(stats.get("total_interacts", 0)) + 1
+
+            # Step 2/5：互动锚点的随机事件（含性格专属事件二次 roll）
+            event_text = ""
+            if self.events is not None:
+                uid_key = str(cat.get("user", uid))
+                today_count_ev = self.events.today_anchor_count(self.store, uid_key, today, "interact")
+                triggered_ids = self.events.today_triggered_ids(self.store, uid_key, today)
+                try:
+                    event_roll = self.events.roll("interact", cat, today_count_ev, triggered_ids)
+                except Exception:
+                    event_roll = None
+                if event_roll is not None:
+                    ev, deltas = event_roll
+                    coin_delta = int(deltas.get("coin", 0) or 0)
+                    if coin_delta:
+                        wallet = root.setdefault("wallet", {})
+                        wallet[uid_key] = int(wallet.get(uid_key, 0)) + coin_delta
+                    cat["mood"] = round(clamp(float(cat.get("mood", 80)) + int(deltas.get("mood", 0) or 0), 0, 100), 4)
+                    cat["energy"] = round(clamp(float(cat.get("energy", 80)) + int(deltas.get("energy", 0) or 0), 0, 100), 4)
+                    cat["intimacy"] = int(cat.get("intimacy", 0)) + int(deltas.get("intimacy", 0) or 0)
+                    cat["growth"] = int(cat.get("growth", 0)) + int(deltas.get("growth", 0) or 0)
+                    event_text = str(ev.get("text", "") or "")
+                    self.events.record_event(root, uid_key, today, "interact", str(ev.get("id", "") or ""), event_text)
+
             cat, stage_msg = self._advance_stage(cat)
             cats[uid] = cat
-            return True, "", cat, stage_msg, mood_add, intimacy_add, growth_add, interact_data[today], energy_cost, mood_multiplier, daily_multiplier, mood_label, daily_label, interaction_buff
+            return True, "", cat, stage_msg, mood_add, intimacy_add, growth_add, interact_data[today], energy_cost, mood_multiplier, daily_multiplier, mood_label, daily_label, interaction_buff, event_text
 
-        ok, err_msg, cat, stage_msg, mood_add, intimacy_add, growth_add, today_count, energy_cost, mood_multiplier, daily_multiplier, mood_label, daily_label, interaction_buff = self.store.update(op)
+        ok, err_msg, cat, stage_msg, mood_add, intimacy_add, growth_add, today_count, energy_cost, mood_multiplier, daily_multiplier, mood_label, daily_label, interaction_buff, event_text = self.store.update(op)
         if not ok:
             return False, err_msg, None
 
-        reward_multiplier = float(mood_multiplier or 1) * float(daily_multiplier or 1) * float(interaction_buff or 1)
         msg = (
             f"{text}\n"
             f"心情 {self._fmt_delta(mood_add)}\n"
             f"亲密度 {self._fmt_delta(intimacy_add)}\n"
             f"成长值 {self._fmt_delta(growth_add)}\n"
-            f"互动收益：{self._fmt_percent(reward_multiplier * 100)}（{mood_label}，{daily_label}）\n"
             f"{'道具加成：' + self._fmt_percent(float(interaction_buff) * 100) + chr(10) if float(interaction_buff or 1) > 1 else ''}"
             f"当前阶段：{stage_name(cat.get('stage', 0))}\n"
             f"今日互动次数：{today_count}/{daily_limit if daily_limit else '不限'}"
@@ -2605,15 +2874,15 @@ class CatgirlService:
             msg += f"\n精力 {self._fmt_delta(-energy_cost)}"
         if stage_msg:
             msg += stage_msg
+        if event_text:
+            msg += f"\n✦ 今日奇遇：{event_text}"
         card = self.draw_care_card(
             "互动结果",
             cat,
             subtitle=action,
             lines=[
                 text,
-                f"互动收益：{self._fmt_percent(reward_multiplier * 100)}（{mood_label}，{daily_label}）",
                 f"道具加成：{self._fmt_percent(float(interaction_buff) * 100)}" if float(interaction_buff or 1) > 1 else "",
-                stage_msg.strip() if stage_msg else "",
             ],
             metrics=[
                 ("心情", self._fmt_delta(mood_add)),
@@ -2621,7 +2890,6 @@ class CatgirlService:
                 ("成长值", self._fmt_delta(growth_add)),
                 ("精力", self._fmt_delta(-energy_cost) if energy_cost else "0.0"),
                 ("今日互动", f"{today_count}/{daily_limit if daily_limit else '不限'}"),
-                ("收益", self._fmt_percent(reward_multiplier * 100)),
                 ("道具", self._fmt_percent(float(interaction_buff or 1) * 100)),
                 ("阶段", stage_name(cat.get("stage", 0))),
             ],
@@ -2792,7 +3060,7 @@ class CatgirlService:
                 footer="发送「背包」查看已拥有道具；发送「猫娘商店」查看可购买道具。",
                 tag=f"use_err_{uid}",
             )
-            return False, msg, card
+            return False, msg, card, {}
         effect = str(item.get("effect", "instant"))
 
         if effect == "recall_runaway":
@@ -2838,7 +3106,7 @@ class CatgirlService:
                     footer="没有可召回猫娘时，可以发送「请赐我一只可爱猫娘吧」重新遇见新的猫娘。",
                     tag=f"recall_err_{uid}",
                 )
-                return False, msg, card
+                return False, msg, card, {}
             card = self.draw_care_card(
                 "猫娘召回",
                 cat,
@@ -2853,7 +3121,7 @@ class CatgirlService:
                 footer="她回来了。记得好好照顾她喔。",
                 tag=f"recall_{uid}",
             )
-            return True, msg, card
+            return True, msg, card, {"effect": "recall_runaway"}
 
         def op(root):
             ok, cat, err_msg = self._load_active_cat(root, uid)
@@ -2897,7 +3165,7 @@ class CatgirlService:
                 buffs = cat.setdefault("buffs", {})
                 buffs["next_interaction_multiplier"] = max(float(buffs.get("next_interaction_multiplier", 1) or 1), float(item.get("multiplier", 1) or 1))
                 cat["buffs"] = buffs
-                detail["buff"] = f"下一次互动收益 {self._fmt_percent(float(buffs['next_interaction_multiplier']) * 100)}"
+                detail["buff"] = f"下一次互动加成 {self._fmt_percent(float(buffs['next_interaction_multiplier']) * 100)}"
             elif effect == "next_work":
                 buffs = cat.setdefault("buffs", {})
                 buffs["next_work_reward_multiplier"] = max(float(buffs.get("next_work_reward_multiplier", 1) or 1), float(item.get("multiplier", 1) or 1))
@@ -2956,16 +3224,20 @@ class CatgirlService:
                 footer="发送「背包」查看已拥有道具；功能卡会在对应操作中自动消耗。",
                 tag=f"use_err_{uid}",
             )
-            return False, msg, card
+            return False, msg, card, detail or {}
 
-        lines = [f"使用了「{detail.get('item')}」。"]
+        msg_lines = [f"使用了「{detail.get('item')}」。"]
+        card_lines = [f"使用了「{detail.get('item')}」。"]
         if detail.get("buff"):
-            lines.append(detail["buff"])
+            msg_lines.append(detail["buff"])
+            card_lines.append(detail["buff"])
         if detail.get("gift_label"):
-            lines.append(f"礼物收益：{self._fmt_percent(float(detail.get('gift_multiplier', 1)) * 100)}（{detail.get('gift_label')}）")
+            gift_line = f"礼物收益：{self._fmt_percent(float(detail.get('gift_multiplier', 1)) * 100)}（{detail.get('gift_label')}）"
+            msg_lines.append(gift_line)
+            card_lines.append(gift_line)
         if detail.get("stage_msg"):
-            lines.append(str(detail.get("stage_msg")).strip())
-        msg = "\n".join(lines) + (
+            msg_lines.append(str(detail.get("stage_msg")).strip())
+        msg = "\n".join(msg_lines) + (
             f"\n饱食度 {self._fmt_delta(detail.get('satiety_add', 0))}"
             f"\n心情 {self._fmt_delta(detail.get('mood_add', 0))}"
             f"\n健康 {self._fmt_delta(detail.get('health_add', 0))}"
@@ -2976,7 +3248,7 @@ class CatgirlService:
         card = self.draw_info_card(
             "道具使用",
             subtitle=str(detail.get("item", "")),
-            lines=lines,
+            lines=card_lines,
             metrics=[
                 ("饱食度", self._fmt_delta(detail.get("satiety_add", 0))),
                 ("心情", self._fmt_delta(detail.get("mood_add", 0))),
@@ -2989,7 +3261,7 @@ class CatgirlService:
             footer="发送「背包」查看剩余道具；发送「猫娘商店」购买更多道具。",
             tag=f"use_{uid}",
         )
-        return True, msg, card
+        return True, msg, card, detail or {}
 
     def care_service(self, uid: str, service_query: str = ""):
         self._finalize_expired_adoption(uid)
@@ -3074,6 +3346,7 @@ class CatgirlService:
             wallet[uid] = balance - price
             root.setdefault("catgirls", {})[uid] = cat
             detail = {
+                "service": str(service.get("name", "护理")),
                 "price": price,
                 "health_add": cat["health"] - health_before,
                 "mood_add": cat["mood"] - mood_before,
@@ -3087,7 +3360,7 @@ class CatgirlService:
         ok, msg, cat, balance, detail = self.store.update(op)
         if not ok:
             card = self.draw_care_card("护理未完成", cat, lines=[msg], metrics=[("余额", f"{balance} {coin_name}")], tag=f"care_err_{uid}") if cat else None
-            return False, msg, card
+            return False, msg, card, {"service": str(service.get("name", "护理"))}
         msg = (
             f"完成护理：{service['name']}\n"
             f"花费：{detail['price']} {coin_name}\n"
@@ -3112,7 +3385,7 @@ class CatgirlService:
             ],
             tag=f"care_{uid}",
         )
-        return True, msg, card
+        return True, msg, card, detail or {"service": str(service.get("name", "护理"))}
 
     def rename(self, uid: str, name: str):
         self._finalize_expired_adoption(uid)
@@ -3146,6 +3419,29 @@ class CatgirlService:
         ) if cat else None
         return ok, msg, card
 
+    def _precheck_appearance_change_payment(self, uid: str, price: int, coin_name: str):
+        def op(root):
+            wallet = root.setdefault("wallet", {})
+            cats = root.setdefault("catgirls", {})
+            current_cat = cats.get(uid)
+            if not current_cat or not current_cat.get("name"):
+                return False, "你还没有猫娘喔～发送「请赐我一只可爱猫娘吧」试试看。", current_cat, 0
+
+            current_cat, changed = normalize_catgirl(current_cat, uid)
+            if changed:
+                cats[uid] = current_cat
+            self._grant_starter_cards(root, uid)
+
+            bag = self._item_quantity_map(root, uid)
+            balance = int(wallet.get(uid, 0))
+            if self._item_count(bag.get(APPEARANCE_CARD_ID)) > 0:
+                return True, "", current_cat, balance
+            if balance < price:
+                return False, f"更换形象需要 {price} {coin_name}，你目前有 {balance} {coin_name}，还不够喔～", current_cat, balance
+            return True, "", current_cat, balance
+
+        return self.store.update(op)
+
     async def change_image(self, uid: str, image_src: str):
         """安全保存图片，成功后原子扣费。"""
         cat = self._get(uid)
@@ -3153,6 +3449,20 @@ class CatgirlService:
             return False, self.missing_cat_message(uid), None
         _, _, appearance_change_price = self._wish_rules()
         coin_name = self._coin_name()
+        can_pay, pay_msg, pay_cat, pay_balance = self._precheck_appearance_change_payment(
+            uid,
+            appearance_change_price,
+            coin_name,
+        )
+        if not can_pay:
+            card = self.draw_care_card(
+                "形象更换未完成",
+                pay_cat or cat,
+                lines=[pay_msg],
+                metrics=[("余额", f"{pay_balance} {coin_name}")],
+                tag=f"image_err_{uid}",
+            ) if (pay_cat or cat) else None
+            return False, pay_msg, card
 
         safe_uid = self._safe_uid(uid)
         stamp = int(time.time() * 1000)
@@ -3418,12 +3728,13 @@ class CatgirlService:
 
         canvas = self._make_card_background((total_w, total_h)).convert("RGBA")
         d = ImageDraw.Draw(canvas, "RGBA")
+        t = self.theme
 
-        title_font = self._font(76)
-        name_font = self._font(32)
+        title_font = self._title_font(76)
+        name_font = self._title_font(32)
         info_font = self._font(26)
 
-        d.text((total_w // 2, 60), "猫娘羁绊排行榜", font=title_font, fill=(255, 140, 0), anchor="mm")
+        d.text((total_w // 2, 60), "猫娘羁绊排行榜", font=title_font, fill=t["primary"], anchor="mm")
 
         for i, cat in enumerate(cats):
             row = i // cols
@@ -3434,16 +3745,16 @@ class CatgirlService:
             self._draw_gradient_panel(
                 canvas,
                 (x, y, x + card_w, y + card_h),
-                radius=18,
-                alpha=102,
-                outline=(255, 255, 255, 220),
-                width=3,
+                radius=t["radius_panel"],
+                alpha=108,
+                outline=t["card_outline"],
+                width=2,
             )
 
             cat_name = str(cat.get("name", "猫娘"))
             if len(cat_name) > 8:
                 cat_name = cat_name[:8] + "..."
-            d.text((x + card_w // 2, y + 30), cat_name, font=name_font, fill=(40, 40, 40), anchor="mm")
+            d.text((x + card_w // 2, y + 30), cat_name, font=name_font, fill=t["text_dark"], anchor="mm")
 
             img_y = y + 60
             img_path = self.image_path(cat)
@@ -3462,39 +3773,55 @@ class CatgirlService:
             if len(owner) > 10:
                 owner = owner[:10] + "..."
             info_items = [
-                ("阶段", stage_name(cat.get("stage", 0)), (255, 239, 215, 190), (218, 116, 31, 255)),
-                ("羁绊", str(bond_score(cat)), (255, 228, 220, 180), (222, 83, 61, 255)),
-                ("主人", str(owner), (255, 243, 199, 175), (190, 126, 31, 255)),
+                ("阶段", stage_name(cat.get("stage", 0)), t["primary"]),
+                ("羁绊", str(bond_score(cat)), t["pink"]),
+                ("主人", str(owner), t["accent"]),
             ]
             info_gap = 8
             info_w = (card_w - 28 - info_gap * 2) // 3
             info_h = 74
-            for info_idx, (label, value, fill, text_fill) in enumerate(info_items):
+            for info_idx, (label, value, text_fill) in enumerate(info_items):
                 ix = x + 14 + info_idx * (info_w + info_gap)
                 iy = info_y
-                d.rounded_rectangle((ix, iy, ix + info_w, iy + info_h), radius=12, fill=fill, outline=(255, 255, 255, 180), width=1)
-                d.text((ix + info_w // 2, iy + 23), label, font=self._font(20), fill=(92, 67, 48, 220), anchor="mm")
+                self._draw_round_panel(
+                    canvas,
+                    (ix, iy, ix + info_w, iy + info_h),
+                    radius=10,
+                    fill=t["panel_fill"],
+                    outline=t["panel_outline"],
+                    width=1,
+                    shadow=False,
+                )
+                d.text((ix + info_w // 2, iy + 23), label, font=self._font(20), fill=t["muted"], anchor="mm")
                 value_font = self._fit_font(d, value, 24, info_w - 12, min_size=17)
                 d.text((ix + info_w // 2, iy + 52), self._truncate_text(d, value, value_font, info_w - 12), font=value_font, fill=text_fill, anchor="mm")
 
             coin_name = self._coin_name()
             balance_text = f"{int(cat.get('wallet_balance', 0) or 0)} {coin_name}"
             coin_y = info_y + info_h + 12
-            d.rounded_rectangle((x + 14, coin_y, x + card_w - 14, coin_y + 58), radius=14, fill=(255, 235, 205, 185), outline=(255, 255, 255, 180), width=1)
-            d.text((x + 30, coin_y + 29), f"{coin_name}数量", font=self._font(22), fill=(134, 81, 35, 230), anchor="lm")
+            self._draw_round_panel(
+                canvas,
+                (x + 14, coin_y, x + card_w - 14, coin_y + 58),
+                radius=12,
+                fill=(255, 244, 232, 195),
+                outline=t["panel_outline"],
+                width=1,
+                shadow=False,
+            )
+            d.text((x + 30, coin_y + 29), f"{coin_name}数量", font=self._font(22), fill=t["muted"], anchor="lm")
             value_font = self._fit_font(d, balance_text, 26, card_w - 150, min_size=18)
             self._draw_diamond_icon(d, x + card_w - self._text_size(d, balance_text, value_font)[0] - 54, coin_y + 29, 24)
-            d.text((x + card_w - 28, coin_y + 30), balance_text, font=value_font, fill=(255, 140, 0), anchor="rm")
+            d.text((x + card_w - 28, coin_y + 30), balance_text, font=value_font, fill=t["primary"], anchor="rm")
 
         out = self.cache_dir / f"bond_rank_{gid or 'global'}.png"
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-        canvas.convert("RGB").save(out, "PNG")
+        save_scaled_image(canvas.convert("RGB"), out, "PNG", scale=self._output_image_scale())
         return out
 
     def _draw_no_image(self, d: ImageDraw.ImageDraw, x: int, y: int, img_w: int, img_h: int):
-        d.rounded_rectangle((x, y, x + img_w, y + img_h), radius=10, fill=(240, 240, 240))
+        t = self.theme
+        d.rounded_rectangle((x, y, x + img_w, y + img_h), radius=10, fill=(238, 242, 246), outline=t["panel_outline"], width=1)
         font = self._font(28)
-        d.text((x + img_w // 2, y + img_h // 2), "暂无图片", font=font, fill=(100, 100, 100), anchor="mm")
+        d.text((x + img_w // 2, y + img_h // 2), "暂无图片", font=font, fill=t["muted"], anchor="mm")
 
     def _cover(self, img: Image.Image, w: int, h: int) -> Image.Image:
         iw, ih = img.size

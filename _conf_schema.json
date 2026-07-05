@@ -50,6 +50,26 @@
     "description": "更换形象价格",
     "default": 900
   },
+  "cache_cleanup_enabled": {
+    "type": "bool",
+    "description": "是否自动清理插件生成的图片缓存",
+    "default": true
+  },
+  "cache_retention_days": {
+    "type": "float",
+    "description": "缓存图片保留天数，0 表示不按时间清理",
+    "default": 3
+  },
+  "cache_max_mb": {
+    "type": "int",
+    "description": "缓存目录最大容量 MB，0 表示不按容量清理",
+    "default": 100
+  },
+  "cache_cleanup_interval_hours": {
+    "type": "float",
+    "description": "自动清理间隔小时，最低 1 小时",
+    "default": 6
+  },
   "extra_admin_ids": {
     "type": "list",
     "description": "额外管理员 ID 列表（AstrBot 管理员无需填写）",
