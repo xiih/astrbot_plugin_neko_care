@@ -9,6 +9,7 @@ from astrbot.api import logger
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.core.star.filter.command import GreedyStr
+from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
 try:
     from astrbot.api.message_components import Plain, Image
@@ -71,7 +72,7 @@ def neko_command(command_name: str, alias: set | None = None, **kwargs):
 
     return decorator
 
-@register("astrbot_plugin_neko_care", "若梦&TenmaGabriel0721", "猫娘羁绊养成、签到打工", "1.5.3")
+@register("astrbot_plugin_neko_care", "若梦&TenmaGabriel0721", "猫娘羁绊养成、签到打工", "1.5.6")
 class SapphireEconomyPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -134,7 +135,7 @@ class SapphireEconomyPlugin(Star):
         self.catgirl = CatgirlService(
             self.store, self.economy, self.coin_name, self.base_dir, self.catgirl_dir,
             self.upload_dir, self.font_dir, self.cache_dir, self.wish_probability, self.wish_pity, self.appearance_change_price,
-            self.runtime_config.snapshot
+            self.runtime_config.snapshot, astrbot_temp_dir=Path(get_astrbot_temp_path())
         )
         self.events = EventService(self.runtime_config.snapshot)
         # 把事件引擎注入三个现有 service，让它们在 op 内同事务触发今日奇遇

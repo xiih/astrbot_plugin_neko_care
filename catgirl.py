@@ -108,6 +108,7 @@ class CatgirlService:
         appearance_change_price: int = 900,
         runtime_config_provider: Callable[[], Dict] | None = None,
         events: "EventService | None" = None,
+        astrbot_temp_dir: Path | None = None,
     ):
         self.store = store
         self.economy = economy
@@ -117,6 +118,7 @@ class CatgirlService:
         self.upload_dir = Path(upload_dir)
         self.font_dir = Path(font_dir)
         self.cache_dir = Path(cache_dir)
+        self.astrbot_temp_dir = Path(astrbot_temp_dir) if astrbot_temp_dir else None
         self.wish_probability = float(wish_probability)
         self.wish_pity = int(wish_pity)
         self.appearance_change_price = int(appearance_change_price)
@@ -3608,9 +3610,10 @@ class CatgirlService:
             src = src[7:]
 
         p = Path(src).resolve()
-        try:
-            p.relative_to(self.upload_dir.resolve())
-        except ValueError:
+        allowed_dirs = [self.upload_dir.resolve()]
+        if self.astrbot_temp_dir:
+            allowed_dirs.append(self.astrbot_temp_dir.resolve())
+        if not any(p == directory or p.is_relative_to(directory) for directory in allowed_dirs):
             raise PermissionError(f"安全限制：不允许访问 {src}")
 
         if p.exists() and p.is_file():
